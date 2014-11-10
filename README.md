@@ -1,3 +1,4 @@
+
 Stage 1: Basic Implementation of Paxos Following Wikipedia Description
 
 This protocol is the most basic of the Paxos family. Each instance of the Basic
