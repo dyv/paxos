@@ -1,3 +1,12 @@
+Final Repository is located at "https://github.com/dyv/distfs"
+This is using Go for the primary language. Because it requires a very specific
+directory structure I have provided basic scripts when running from the
+"peerster/finalProject" directory. To do this run:
+$ ./init.sh
+$ ./build.sh
+$ ./test.sh
+To Run from peerster/finalProject
+
 Stage 1: Basic Implementation of Paxos Following Wikipedia Description
 
 This protocol is the most basic of the Paxos family. Each instance of the Basic
@@ -64,4 +73,11 @@ values returned in the Promise message are null the first time a proposal is
 made, since no Acceptor has accepted a value before in this round.
 
 Stage 2: Implement a "File System" with Read, Write
+    Implement a Vector of Events each of which is a Paxos Instance
+    Implement Operational Transforms? (Is this needed)
+        Add?
+        Remove?
+        Choose all pairs of possible events and decide on what happens
+    Independent Events
+    Idempotent Events
 Stage 3: Make more Efficient and Implement multiple files
