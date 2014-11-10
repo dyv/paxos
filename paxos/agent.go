@@ -123,12 +123,15 @@ func (a *Agent) ServeAgents() error {
 			case Prepare:
 				a.Prepare(m.Args[0].(int), p)
 			case Promise:
+				a.Promise(m.Args[0].(int), m.Args[1].(RoundValue), p)
 			case Nack:
+				a.Nack(m.Args[0].(int))
 			case AcceptRequest:
+				a.AcceptRequest(m.Args[0].(int), m.Args[1].(Value), p)
 			case Accepted:
+				a.Accepted(m.Args[0].(int), m.Args[1].(Value))
 			default:
 				log.Println("Received Message With Bad Type")
-
 			}
 		}
 	}(a, conn, by)
