@@ -3,10 +3,12 @@ package paxos
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
+	"time"
 )
 
 type RoundValue struct {
@@ -21,34 +23,45 @@ type Agent struct {
 	round      int
 	peers      []Peer
 	addrToPeer map[string]Peer
-	// votes maps each round number with a map that maps
-	// each recieved value to a count
-	votes            map[int]map[Value]int // number of votes proposal i has
-	nvotes           map[int]int
-	accepted         []RoundValue // map proposal number to Value
-	nPeersAccepted   map[int]int
-	proposalAccepted chan bool
+	// votes is the number of votes we have recieved in this round
+	// for each given value
+	votes   map[Value]int
+	voted   map[Peer]bool
+	myvalue Value
+	// history is a list of our history of accepted values
+	history []RoundValue
+	// naccepted is the number of peers that have accepted the
+	// current proposal
+	naccepted int
+	// channel to indicate when the reuqest's proposal is accepted
+	accepted chan bool
 }
 
 func NewAgent(address, port string) (*Agent, error) {
 	var err error
-	a := Agent{}
+	a := &Agent{}
 	a.addr = address
 	a.port = port
 	a.udpaddr, err = net.ResolveUDPAddr("udp", address+":"+port)
 	if err != nil {
 		return nil, err
 	}
-	a.round = 0
+	a.round = -1
 	a.peers = make([]Peer, 0, 10)
+	a.peers = append(a.peers, Peer{a.addr, a.port, nil})
 	a.addrToPeer = make(map[string]Peer)
-	a.votes = make(map[int]map[Value]int)
-	a.nvotes = make(map[int]int)
-	a.accepted = make([]RoundValue, 0)
-	a.nPeersAccepted = make(map[int]int)
-	a.proposalAccepted = make(chan bool)
-	return &a, nil
+	a.addrToPeer[a.udpaddr.String()] = Peer{a.addr, a.port, nil}
+	a.accepted = make(chan bool)
+	return a, nil
 }
+
+func (a *Agent) newRound() {
+	a.round++
+	a.voted = make(map[Peer]bool)
+	a.votes = make(map[Value]int)
+	a.naccepted = 0
+}
+
 func (a *Agent) AddPeer(addr, port string) error {
 	p, err := NewPeer(addr, port)
 	if err != nil {
@@ -111,8 +124,8 @@ func (a *Agent) ServeAgents() error {
 				a.Prepare(m.Args[0].(int), p)
 			case Promise:
 			case Nack:
-			case Accept:
 			case AcceptRequest:
+			case Accepted:
 			default:
 				log.Println("Received Message With Bad Type")
 
@@ -128,26 +141,37 @@ func (a *Agent) Quorum(n int) bool {
 	return n == len(a.peers)/2+1
 }
 
-func (a *Agent) Request(value Value, reply *string) {
+var RequestTimeout error = errors.New("paxos: request timed out")
+
+func (a *Agent) Request(value Value, reply *string) error {
 	args := make([]interface{}, 1)
+	a.newRound()
 	args[0] = a.round
+	a.myvalue = value
 	for _, p := range a.peers {
 		p.Send(Msg{Prepare, args})
 	}
-	a.round += 1
-	a.votes[a.round] = make(map[Value]int)
-	a.votes[a.round][value]++
-	a.nvotes[a.round]++
-	<-a.proposalAccepted
-	*reply = "proposal accepted"
+	// wait for this proposal to be accepted or a timeout to occur
+	timeout := make(chan bool, 10)
+	go func() {
+		time.Sleep(1 * time.Second)
+		timeout <- true
+	}()
+	select {
+	case <-a.accepted:
+		*reply = "proposal accepted"
+		return nil
+	case <-timeout:
+		return RequestTimeout
+	}
 }
 
 func (a *Agent) LastAccepted() RoundValue {
-	l := len(a.accepted)
+	l := len(a.history)
 	if l == 0 {
 		return RoundValue{-1, -1}
 	}
-	return a.accepted[l-1]
+	return a.history[l-1]
 }
 
 // In Prepare a leader creates a proposal identified with a number N
@@ -164,26 +188,30 @@ func (a *Agent) Prepare(n int, p Peer) {
 	}
 }
 
-func (a *Agent) Promise(n int, la RoundValue) {
+func (a *Agent) Promise(r int, la RoundValue, p Peer) {
+	// if this isn't a promise for this round ignore it
+	if r != a.round {
+		return
+	}
 	if la.Round != -1 {
-		a.votes[n][la.Val]++
-		a.nvotes[a.round]++
+		a.votes[a.myvalue]++
+		a.voted[p] = true
 	}
 	// if we have crossed the quorum threshold
-	if a.Quorum(a.nvotes[n]) {
+	if a.Quorum(len(a.voted)) {
 		// get the value that has the most votes
 		mv := la.Val
 		nv := 0
-		for k, v := range a.votes[n] {
+		for k, v := range a.votes {
 			if v > nv {
 				mv = k
 				nv = v
 			}
 		}
 		// accept my own
-		a.accepted = append(a.accepted, RoundValue{n, mv})
+		a.history = append(a.history, RoundValue{r, mv})
 		args := make([]interface{}, 2)
-		args[0] = n
+		args[0] = r
 		args[1] = mv
 		for _, p := range a.peers {
 			p.Send(Msg{AcceptRequest, args})
@@ -191,24 +219,38 @@ func (a *Agent) Promise(n int, la RoundValue) {
 	}
 }
 
-func (a *Agent) Nack(n int) {}
+func (a *Agent) Nack(r int) {
+	if r != a.round {
+		return
+	}
+	a.newRound()
+	args := make([]interface{}, 1)
+	args[0] = a.round
+	for _, p := range a.peers {
+		p.Send(Msg{Prepare, args})
+	}
+}
 
 func (a *Agent) AcceptRequest(r int, v Value, p Peer) {
-	if a.round == r {
-		args := make([]interface{}, 2)
-		args[0] = r
-		args[1] = v
+	if a.round != r {
+		return
+	}
+	args := make([]interface{}, 2)
+	args[0] = r
+	args[1] = v
+	p.Send(Msg{Accepted, args})
+	for _, p := range a.peers {
 		p.Send(Msg{Accepted, args})
-		for _, p := range a.peers {
-			p.Send(Msg{Accepted, args})
-		}
 	}
 }
 
 func (a *Agent) Accepted(r int, v Value) {
-	a.nPeersAccepted[r]++
-	if a.Quorum(a.nPeersAccepted[r]) {
-		a.accepted = append(a.accepted, RoundValue{r, v})
-		a.proposalAccepted <- true
+	if a.round != r {
+		return
+	}
+	a.naccepted++
+	if a.Quorum(a.naccepted) {
+		a.history = append(a.history, RoundValue{r, v})
+		a.accepted <- true
 	}
 }

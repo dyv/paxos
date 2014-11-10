@@ -4,4 +4,4 @@ type Equaler interface {
 	Equal(Equaler) bool
 }
 
-type Value Equaler
+type Value interface{}
