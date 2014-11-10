@@ -1,3 +1,10 @@
+Final Repository is located at "https://github.com/dyv/distfs"
+This is using Go for the primary language. Because it requires a very specific
+directory structure I have provided basic scripts when running from the
+"peerster/finalProject" directory. To do this run:
+$ ./init.sh
+$ ./build.sh
+$ ./test.sh
 
 Stage 1: Basic Implementation of Paxos Following Wikipedia Description
 
