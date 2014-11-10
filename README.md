@@ -5,7 +5,6 @@ directory structure I have provided basic scripts when running from the
 $ ./init.sh
 $ ./build.sh
 $ ./test.sh
-To Run from peerster/finalProject
 
 Stage 1: Basic Implementation of Paxos Following Wikipedia Description
 
