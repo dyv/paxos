@@ -63,6 +63,5 @@ cluster of nodes.
 Here is a graphic representation of the Basic Paxos protocol. Note that the
 values returned in the Promise message are null the first time a proposal is
 made, since no Acceptor has accepted a value before in this round.
-
-Stage 2: Implement a "File System" with Read, Write
-Stage 3: Make more Efficient and Implement multiple files
+Stage 2: Change to Multi-Paxos
+Stage 3: Implement a "File System" with Read, Write
