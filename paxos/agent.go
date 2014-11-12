@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"time"
 )
 
 func init() {
+	rand.Seed(time.Now().UnixNano())
 	log.SetFlags(log.Lshortfile)
 }
 
@@ -42,6 +44,7 @@ type Agent struct {
 	// history is a list of our history of accepted values
 	history       []RoundValue
 	acceptedRound bool
+	promisedRound bool
 	// naccepted is the number of peers that have accepted the
 	// current proposal
 	naccepted int
@@ -169,7 +172,7 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 				resp.Args = []interface{}{err.Error()}
 			} else {
 				resp.Type = ClientResponse
-				resp.Args = []interface{}{"success"}
+				resp.Args = []interface{}{a.AcceptedValue}
 			}
 		default:
 			err = fmt.Errorf("Invalid Message Type: %v", msg.Type)
@@ -313,13 +316,7 @@ var RequestTimeout error = errors.New("paxos: request timed out")
 // receives a Request RPC it takes the role of the proposer. As proposer it
 // sends preparation messages to a Quorum of Acceptors.
 func (a *Agent) Request(value Value) error {
-	args := make([]interface{}, 1)
-	a.newRound()
-	args[0] = a.round + 1
-	a.myvalue = value
-	for _, p := range a.peers {
-		p.Send(Msg{Prepare, a.addr, a.port, args})
-	}
+	a.StartRequest(a.round+1, value)
 	// wait for this proposal to be accepted or a timeout to occur
 	timeout := make(chan bool, 10)
 	go func() {
@@ -331,6 +328,19 @@ func (a *Agent) Request(value Value) error {
 		return nil
 	case <-timeout:
 		return RequestTimeout
+	}
+}
+
+func (a *Agent) StartRequest(round float64, value Value) {
+	args := make([]interface{}, 1)
+	a.newRound()
+	args[0] = round
+	a.myvalue = value
+	a.round = round
+	a.promisedRound = false
+	a.acceptedRound = false
+	for _, p := range a.peers {
+		p.Send(Msg{Prepare, a.addr, a.port, args})
 	}
 }
 
@@ -357,25 +367,31 @@ func (a *Agent) Prepare(n float64, p Peer) {
 	args := make([]interface{}, 2)
 	args[0] = n
 	args[1] = a.LastAccepted()
-	if n > a.round {
+	if n > a.round || (n == a.round && a.promisedRound == false) {
+		a.round = n
+		a.promisedRound = true
+		a.acceptedRound = false
 		p.Send(Msg{Promise, a.addr, a.port, args})
 	} else {
+		log.Printf("%v, %v, %v", n, a.round, a.promisedRound)
 		p.Send(Msg{Nack, a.addr, a.port, args})
 	}
 }
 
+// The Proposer receives several promises for this round
 func (a *Agent) Promise(r float64, la RoundValue, p Peer) {
 	log.Print("PROMISE")
-	// only promise for rounds that are higher than we are currently on
-	// this way we ensure that we only get one value per round
-	if r <= a.round {
+	// only accept promises for the round we are currently on
+	if r != a.round {
+		log.Printf("r != a.round: %v != %v", r, a.round)
 		return
 	}
-	// After promising set a.round = r so we can never promise another value
-	// for this same round
 	a.round = r
 	if la.Round < 0 {
 		a.votes[a.myvalue]++
+		a.voted[p] = true
+	} else {
+		a.votes[la.Val]++
 		a.voted[p] = true
 	}
 	// if we have crossed the quorum threshold
@@ -395,21 +411,20 @@ func (a *Agent) Promise(r float64, la RoundValue, p Peer) {
 		args[0] = r
 		args[1] = mv
 		for _, p := range a.peers {
+			log.Print("Sending Accept Request Message")
 			p.Send(Msg{AcceptRequest, a.addr, a.port, args})
 		}
+		return
 	}
+	log.Print("Not at Quorum: ", a.voted)
 }
 
 func (a *Agent) Nack(r float64, rv RoundValue) {
 	log.Print("NACK")
 	// if we have recieved a nack for a greater round than this
 	if rv.Round > a.round {
-		args := []interface{}{rv.Round, rv.Val}
-		a.history = append(a.history, rv)
-		for _, p := range a.peers {
-			p.Send(Msg{Accepted, a.addr, a.port, args})
-		}
-		return
+		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
+		a.StartRequest(rv.Round+1, rv.Val)
 	}
 	if r < a.round {
 		return

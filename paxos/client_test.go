@@ -23,14 +23,23 @@ func TestClient(t *testing.T) {
 		t.Error("Error Connecting With Server:", err)
 		return
 	}
-	resp, err := c.Request("Hello")
+	resp, err := c.Request("Request 1")
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
 	}
 	t.Log("Response:", resp)
-	if resp != "success" {
+	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
+	resp, err = c.Request("Request 2")
+	if err != nil {
+		t.Error("Error Requesting from Paxos Node:", err)
+		return
+	}
+	if resp != "Request 1" {
+		t.Error("Server Failed")
+	}
+
 	t.Log("TESTED NEW CLIENT")
 }
