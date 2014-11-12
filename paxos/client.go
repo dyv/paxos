@@ -1,6 +1,11 @@
 package paxos
 
-import "net/rpc"
+import (
+	"encoding/json"
+	"log"
+	"net"
+	"time"
+)
 
 type Server struct {
 	addr string
@@ -11,24 +16,40 @@ type Server struct {
 // the distributed Paxos store
 type Client struct {
 	// server is the node that it connects to
-	s *rpc.Client
+	s net.Conn
 	// servers are "address:port" strings
-	servers []Server
+	Servers []Server
+	Retries int
+}
+
+func NewClient() *Client {
+	c := new(Client)
+	c.Servers = make([]Server, 0)
+	c.Retries = 10
+	return c
 }
 
 func (c *Client) AddServer(addr, port string) {
-	c.servers = append(c.servers, Server{addr, port})
+	c.Servers = append(c.Servers, Server{addr, port})
 }
 
 func (c *Client) Connect(s Server) error {
 	var err error
-	c.s, err = rpc.DialHTTP("tcp", s.addr+":"+s.port)
+	for i := 0; i < c.Retries; i++ {
+		c.s, err = net.Dial("tcp", net.JoinHostPort(s.addr, s.port))
+		if err == nil {
+			log.Print("Successfully Connected")
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	return err
 }
 
 func (c *Client) Reconnect() error {
 	var err error
-	for _, s := range c.servers {
+	for _, s := range c.Servers {
 		// if we succssfully connect
 		err = c.Connect(s)
 		if err == nil {
@@ -38,14 +59,23 @@ func (c *Client) Reconnect() error {
 	return err
 }
 
-func (c *Client) Request(v string) (interface{}, error) {
-	err := rpc.ErrShutdown
-	var reply interface{}
-	for err != rpc.ErrShutdown {
-		err = c.s.Call("Agent.Request", v, &reply)
-		if err == rpc.ErrShutdown {
-			err = c.Reconnect()
-		}
+func (c *Client) Request(val string) (string, error) {
+	enc := json.NewEncoder(c.s)
+	args := []interface{}{Value(val)}
+	var m Msg = Msg{ClientRequest, "0", "0", args}
+	log.Print("Client Sending Request: ", m)
+	err := enc.Encode(m)
+	if err != nil {
+		log.Print("Error encoding client request:", err)
+		return "", err
 	}
-	return v, err
+	dec := json.NewDecoder(c.s)
+	var resp Msg
+	err = dec.Decode(&resp)
+	if err != nil {
+		log.Print("Error Decoding Server Response:", err)
+		return "", err
+	}
+	log.Print("Client Received Response: ", resp)
+	return resp.Args[0].(string), err
 }
