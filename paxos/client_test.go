@@ -1,0 +1,36 @@
+package paxos
+
+import "testing"
+
+func TestClient(t *testing.T) {
+	t.Log("TESTING NEW CLIENT")
+	a, err := NewAgent("36807")
+	if err != nil {
+		t.Error("Error Creating Agent:", err)
+		return
+	}
+	defer a.Close()
+	a.Run()
+	c := NewClient()
+	addr, err := getAddress()
+	if err != nil {
+		t.Error("Error getting address:", err)
+		return
+	}
+	c.AddServer(addr, "36807")
+	err = c.Connect(c.Servers[0])
+	if err != nil {
+		t.Error("Error Connecting With Server:", err)
+		return
+	}
+	resp, err := c.Request("Hello")
+	if err != nil {
+		t.Error("Error Requesting from Paxos Node:", err)
+		return
+	}
+	t.Log("Response:", resp)
+	if resp != "success" {
+		t.Error("Server Failed")
+	}
+	t.Log("TESTED NEW CLIENT")
+}
