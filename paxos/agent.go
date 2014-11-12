@@ -40,16 +40,17 @@ type Agent struct {
 	voted   map[Peer]bool
 	myvalue Value
 	// history is a list of our history of accepted values
-	history []RoundValue
+	history       []RoundValue
+	acceptedRound bool
 	// naccepted is the number of peers that have accepted the
 	// current proposal
 	naccepted int
 	// channel to indicate when the reuqest's proposal is accepted
-	accepted chan bool
-	// done
+	accepted       chan bool
 	done           chan bool
 	servingClients bool
 	servingAgents  bool
+	AcceptedValue  Value
 }
 
 // getAddress gets the localhosts IPv4 address.
@@ -108,7 +109,6 @@ func (a *Agent) Close() {
 // count to indicate we have a new round and clears the recorded votes and
 // accepted.
 func (a *Agent) newRound() {
-	a.round++
 	a.voted = make(map[Peer]bool)
 	a.votes = make(map[Value]int)
 	a.naccepted = 0
@@ -260,7 +260,7 @@ func (a *Agent) ServeAgents() error {
 				log.Print(a.addrToPeer)
 				continue
 			}
-
+			// TODO(dyv): Typesafe way of doing this.
 			switch m.Type {
 			case Prepare:
 				if len(m.Args) != 1 {
@@ -270,25 +270,25 @@ func (a *Agent) ServeAgents() error {
 				a.Prepare(m.Args[0].(float64), p)
 			case Promise:
 				if len(m.Args) != 2 {
-					log.Println("Prepare Message: Not Enough Arguments")
+					log.Println("Promise Message: Not Enough Arguments")
 					break
 				}
 				a.Promise(m.Args[0].(float64), iMapToRV(m.Args[1].(map[string]interface{})), p)
 			case Nack:
-				if len(m.Args) != 1 {
-					log.Println("Prepare Message: Not Enough Arguments")
+				if len(m.Args) != 2 {
+					log.Println("Nack Message: Not Enough Arguments")
 					break
 				}
-				a.Nack(m.Args[0].(float64))
+				a.Nack(m.Args[0].(float64), iMapToRV(m.Args[1].(map[string]interface{})))
 			case AcceptRequest:
 				if len(m.Args) != 2 {
-					log.Println("Prepare Message: Not Enough Arguments")
+					log.Println("AcceptRequest Message: Not Enough Arguments")
 					break
 				}
 				a.AcceptRequest(m.Args[0].(float64), m.Args[1].(Value), p)
 			case Accepted:
 				if len(m.Args) != 2 {
-					log.Println("Prepare Message: Not Enough Arguments")
+					log.Println("Accpeted Message: Not Enough Arguments")
 					break
 				}
 				a.Accepted(m.Args[0].(float64), m.Args[1].(Value))
@@ -315,7 +315,7 @@ var RequestTimeout error = errors.New("paxos: request timed out")
 func (a *Agent) Request(value Value) error {
 	args := make([]interface{}, 1)
 	a.newRound()
-	args[0] = a.round
+	args[0] = a.round + 1
 	a.myvalue = value
 	for _, p := range a.peers {
 		p.Send(Msg{Prepare, a.addr, a.port, args})
@@ -357,7 +357,7 @@ func (a *Agent) Prepare(n float64, p Peer) {
 	args := make([]interface{}, 2)
 	args[0] = n
 	args[1] = a.LastAccepted()
-	if n >= a.round {
+	if n > a.round {
 		p.Send(Msg{Promise, a.addr, a.port, args})
 	} else {
 		p.Send(Msg{Nack, a.addr, a.port, args})
@@ -365,11 +365,15 @@ func (a *Agent) Prepare(n float64, p Peer) {
 }
 
 func (a *Agent) Promise(r float64, la RoundValue, p Peer) {
-	log.Print("PROMISE: ", r, ", ", la)
-	// if this isn't a promise for this round ignore it
-	if r != a.round {
+	log.Print("PROMISE")
+	// only promise for rounds that are higher than we are currently on
+	// this way we ensure that we only get one value per round
+	if r <= a.round {
 		return
 	}
+	// After promising set a.round = r so we can never promise another value
+	// for this same round
+	a.round = r
 	if la.Round < 0 {
 		a.votes[a.myvalue]++
 		a.voted[p] = true
@@ -396,9 +400,18 @@ func (a *Agent) Promise(r float64, la RoundValue, p Peer) {
 	}
 }
 
-func (a *Agent) Nack(r float64) {
+func (a *Agent) Nack(r float64, rv RoundValue) {
 	log.Print("NACK")
-	if r != a.round {
+	// if we have recieved a nack for a greater round than this
+	if rv.Round > a.round {
+		args := []interface{}{rv.Round, rv.Val}
+		a.history = append(a.history, rv)
+		for _, p := range a.peers {
+			p.Send(Msg{Accepted, a.addr, a.port, args})
+		}
+		return
+	}
+	if r < a.round {
 		return
 	}
 	a.newRound()
@@ -411,24 +424,29 @@ func (a *Agent) Nack(r float64) {
 
 func (a *Agent) AcceptRequest(r float64, v Value, p Peer) {
 	log.Print("ACCEPTREQUEST")
-	if a.round != r {
+	if r != a.round {
+		return
+	}
+	if a.acceptedRound && a.history[len(a.history)-1].Val != v {
 		return
 	}
 	args := make([]interface{}, 2)
 	args[0] = r
 	args[1] = v
-	for _, p := range a.peers {
-		p.Send(Msg{Accepted, a.addr, a.port, args})
-	}
+	a.acceptedRound = true
+	a.AcceptedValue = v
+	a.history = append(a.history, RoundValue{r, v})
+	p.Send(Msg{Accepted, a.addr, a.port, args})
 }
 
 func (a *Agent) Accepted(r float64, v Value) {
 	log.Print("ACCEPTED")
-	if a.round != r {
+	if r != a.round {
 		return
 	}
 	a.naccepted++
 	if a.Quorum(a.naccepted) {
+		a.AcceptedValue = v
 		a.history = append(a.history, RoundValue{r, v})
 		a.accepted <- true
 	}
