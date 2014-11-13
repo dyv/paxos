@@ -10,7 +10,8 @@ const (
 	Accepted
 	ClientRequest
 	ClientResponse
-
+	ClientRedirect
+	Heartbeat
 	Error
 )
 
@@ -30,6 +31,10 @@ func (m MsgType) String() string {
 		return "ClientRequest"
 	case ClientResponse:
 		return "ClientResponse"
+	case ClientRedirect:
+		return "Redirect"
+	case Heartbeat:
+		return "Heartbeat"
 	case Error:
 		return "Error"
 	}

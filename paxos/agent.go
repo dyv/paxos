@@ -28,18 +28,20 @@ func iMapToRV(m map[string]interface{}) RoundValue {
 	return RoundValue{m["round"].(float64), m["value"].(Value)}
 }
 
+var LeaderTimeout time.Duration = 1 * time.Second
+
 // Agent collapses the multiple roles in Paxos into a single role.
 // It plays the role of the Proposer, Acceptor, and Learner.
 type Agent struct {
 	Peer
 	udpaddr    *net.UDPAddr
 	round      float64
-	peers      []Peer
+	peers      []Peer // Deprecate
 	addrToPeer map[string]Peer
 	// votes is the number of votes we have recieved in this round
 	// for each given value
 	votes   map[Value]int
-	voted   map[Peer]bool
+	voted   map[Peer]bool // consider making similar struct for accepted
 	myvalue Value
 	// history is a list of our history of accepted values
 	history       []RoundValue
@@ -54,6 +56,12 @@ type Agent struct {
 	servingClients bool
 	servingAgents  bool
 	AcceptedValue  Value
+	// leader election for efficiency and multi-paxos
+	isLeader      bool             // is this current node the leader
+	leader        *Peer            // who is the current leader (for redirects)
+	leaderCurrent bool             // is the leader current (every T seconds check)
+	leaderTimeout <-chan time.Time // how long before the leader is invalidated
+	heartbeat     <-chan time.Time // how long before leader should send another message
 }
 
 // getAddress gets the localhosts IPv4 address.
@@ -94,6 +102,7 @@ func NewAgent(port string) (*Agent, error) {
 	a.accepted = make(chan bool)
 	a.Connect(a.addr, a.port)
 	a.done = make(chan bool)
+	// setup leader information
 	return a, nil
 }
 
@@ -166,6 +175,17 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 		var resp Msg
 		switch msg.Type {
 		case ClientRequest:
+			// if I am not the leader and there is a leader I defer to
+			// then redirect the client to them
+			if !a.isLeader && a.leader != nil {
+				// if there is a leader send a redirect to that peer
+				resp.Type = ClientRedirect
+				resp.Args = []interface{}{a.leader.addr, a.leader.port}
+				enc.Encode(resp)
+				fmt.Println(a.addr, a.port)
+				fmt.Println("REDIRECTING: ", a.isLeader, a.leader)
+				return
+			}
 			err = a.Request(msg.Args[0].(Value))
 			if err != nil {
 				resp.Type = Error
@@ -214,6 +234,16 @@ func (a *Agent) ServeClients() error {
 	return nil
 }
 
+func (a *Agent) SendHeartbeat() {
+	// if I am not a leader don't spam and send heartbeats
+	if !a.isLeader {
+		return
+	}
+	for _, p := range a.peers {
+		p.Send(Msg{Heartbeat, a.addr, a.port, nil})
+	}
+}
+
 // ServeAgents serves other Paxos Agents. It listens on its port for other
 // Paxos agents to send it requests. These requests are encoded using json and
 // each request is able to fit into a single UDP packet. This essentially
@@ -227,6 +257,8 @@ func (a *Agent) ServeAgents() error {
 	a.servingAgents = true
 	by := make([]byte, 64000)
 	go func(a *Agent, conn *net.UDPConn, by []byte) {
+		a.leaderTimeout = time.Tick(LeaderTimeout / 2)
+		a.heartbeat = time.Tick(LeaderTimeout)
 		defer conn.Close()
 		for {
 			conn.SetDeadline(time.Now().Add(time.Millisecond * 100))
@@ -234,6 +266,19 @@ func (a *Agent) ServeAgents() error {
 			case <-a.done:
 				log.Println("Killing Agents")
 				return
+			case <-a.heartbeat:
+				a.SendHeartbeat()
+			case <-a.leaderTimeout:
+				// At the beginning of each heart beat round
+				// if the leader has not been updated kill it
+				// otherwise say that the leader is not current
+				// and wait for the leader to verify that it is alive
+				// TODO(dyv): Start Leader Election Process here
+				if !a.leaderCurrent {
+					a.leader = nil
+				}
+				a.leaderCurrent = false
+				log.Println("Sending heartbeat")
 			default:
 			}
 			n, _, err := conn.ReadFromUDP(by)
@@ -265,6 +310,20 @@ func (a *Agent) ServeAgents() error {
 			}
 			// TODO(dyv): Typesafe way of doing this.
 			switch m.Type {
+			case Heartbeat:
+				// if we have already determined that the leader is current
+				// for this round then dont do anything
+				if a.leaderCurrent {
+					continue
+				}
+				// if the leader needs to be updated and this is the leader
+				// we think it should be then say that this leader is alive
+				if !a.leaderCurrent &&
+					a.leader != nil &&
+					a.leader.addr == p.addr &&
+					a.leader.port == p.port {
+					a.leaderCurrent = true
+				}
 			case Prepare:
 				if len(m.Args) != 1 {
 					log.Println("Prepare Message: Not Enough Arguments")
@@ -318,7 +377,7 @@ var RequestTimeout error = errors.New("paxos: request timed out")
 func (a *Agent) Request(value Value) error {
 	a.StartRequest(a.round+1, value)
 	// wait for this proposal to be accepted or a timeout to occur
-	timeout := make(chan bool, 10)
+	timeout := make(chan bool)
 	go func() {
 		time.Sleep(1 * time.Second)
 		timeout <- true
@@ -394,8 +453,10 @@ func (a *Agent) Promise(r float64, la RoundValue, p Peer) {
 		a.votes[la.Val]++
 		a.voted[p] = true
 	}
-	// if we have crossed the quorum threshold
+	// If we have been promised a quorum of votes
 	if a.Quorum(len(a.voted)) {
+		a.isLeader = true
+		a.leader = &a.Peer
 		// get the value that has the most votes
 		mv := la.Val
 		nv := 0
@@ -421,6 +482,7 @@ func (a *Agent) Promise(r float64, la RoundValue, p Peer) {
 
 func (a *Agent) Nack(r float64, rv RoundValue) {
 	log.Print("NACK")
+	a.isLeader = false
 	// if we have recieved a nack for a greater round than this
 	if rv.Round > a.round {
 		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
@@ -451,6 +513,14 @@ func (a *Agent) AcceptRequest(r float64, v Value, p Peer) {
 	a.acceptedRound = true
 	a.AcceptedValue = v
 	a.history = append(a.history, RoundValue{r, v})
+	// if we are not responding to our own request
+	if p.addr != a.addr || p.port != a.port {
+		// when I send back a set request say that they are the leader
+		fmt.Println("Setting Leader: ", p)
+		fmt.Println("I am: ", a.addr, a.port)
+		a.leader = &p
+		a.isLeader = false
+	}
 	p.Send(Msg{Accepted, a.addr, a.port, args})
 }
 

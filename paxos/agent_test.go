@@ -1,8 +1,13 @@
 package paxos
 
-import "testing"
+import (
+	"io/ioutil"
+	"log"
+	"testing"
+)
 
 func TestNewAgent(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
 	a, err := NewAgent("36804")
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
@@ -12,6 +17,7 @@ func TestNewAgent(t *testing.T) {
 }
 
 func TestConnect(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
 	a, err := NewAgent("36804")
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
@@ -37,6 +43,7 @@ func TestConnect(t *testing.T) {
 }
 
 func TestRunAgent(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
 	a, err := NewAgent("36804")
 	if err != nil {
 		t.Error("Error Creating Agent:", err)

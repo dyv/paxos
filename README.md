@@ -2,6 +2,8 @@ What happens if proposer dies in my model. Need someone to replace and start
 proposing. Consider using timers (and making sure everyone knows who the client
 is)
 
+Failure after Promising: Need to Store to disk my promise.
+
 Final Repository is located at "https://github.com/dyv/distfs"
 This is using Go for the primary language. Because it requires a very specific
 directory structure I have provided basic scripts when running from the

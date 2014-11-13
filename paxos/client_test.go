@@ -1,8 +1,13 @@
 package paxos
 
-import "testing"
+import (
+	"io/ioutil"
+	"log"
+	"testing"
+)
 
 func TestClient(t *testing.T) {
+	log.SetOutput(ioutil.Discard)
 	t.Log("TESTING NEW CLIENT")
 	a, err := NewAgent("36807")
 	if err != nil {
