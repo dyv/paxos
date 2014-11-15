@@ -9,7 +9,7 @@ import (
 func TestPaxosWithOneAgent(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
 	t.Log("Testing Paxos with One Agent")
-	a, err := NewAgent("36808")
+	a, err := NewAgent("36808", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
@@ -52,17 +52,17 @@ func TestPaxosWithOneAgent(t *testing.T) {
 func TestPaxosWithThreeAgents(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
 	t.Log("Testing Paxos with Three Agent")
-	a1, err := NewAgent("36809")
+	a1, err := NewAgent("36809", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a2, err := NewAgent("36810")
+	a2, err := NewAgent("36810", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a3, err := NewAgent("36811")
+	a3, err := NewAgent("36811", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
@@ -137,17 +137,17 @@ func TestPaxosWithThreeAgents(t *testing.T) {
 func TestPaxosWithThreeAgentsAndAFailure(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
 	t.Log("Testing Paxos with Three Agent")
-	a1, err := NewAgent("36812")
+	a1, err := NewAgent("36812", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a2, err := NewAgent("36813")
+	a2, err := NewAgent("36813", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a3, err := NewAgent("36814")
+	a3, err := NewAgent("36814", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
@@ -220,19 +220,19 @@ func TestPaxosWithThreeAgentsAndAFailure(t *testing.T) {
 }
 
 func TestPaxosRedirect(t *testing.T) {
-	//log.SetOutput(ioutil.Discard)
+	log.SetOutput(ioutil.Discard)
 	t.Log("Testing Paxos with Three Agent")
-	a1, err := NewAgent("36815")
+	a1, err := NewAgent("36815", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a2, err := NewAgent("36816")
+	a2, err := NewAgent("36816", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a3, err := NewAgent("36817")
+	a3, err := NewAgent("36817", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return

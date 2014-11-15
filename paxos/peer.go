@@ -22,8 +22,12 @@ func NewPeer(address, port string) (*Peer, error) {
 	return &Peer{address, port, client}, nil
 }
 
-func (p Peer) Send(m Msg) error {
-	log.Print("Sending to: ", p.addr, ":", p.port)
+func (p Peer) Send(m Msg, send bool) error {
+	if !send {
+		return nil
+	}
+	log.Print("Destination: ", p.addr, ":", p.port)
+	log.Print("Msg: ", m)
 	client, err := net.Dial("udp", p.addr+":"+p.port)
 	if err != nil {
 		log.Println("Error Dialing Peer:", err)

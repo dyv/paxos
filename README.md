@@ -1,3 +1,14 @@
+If entry > previous entries || round > previous rounds then accept this new
+value
+Need to treat these new values as new instances of paxos
+Think of each entry 
+
+Change Client Connect to immediately recieve info back:
+    ClientRedirect LeaderAddress LeaderPort
+    ClientConn ClientId, ClientSeqno (these are associated with each client connection and
+            reset on reconnect)
+
+
 What happens if proposer dies in my model. Need someone to replace and start
 proposing. Consider using timers (and making sure everyone knows who the client
 is)

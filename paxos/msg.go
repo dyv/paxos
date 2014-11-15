@@ -3,7 +3,8 @@ package paxos
 type MsgType uint
 
 const (
-	Prepare MsgType = iota
+	Empty MsgType = iota
+	Prepare
 	Promise
 	Nack
 	AcceptRequest
@@ -11,12 +12,15 @@ const (
 	ClientRequest
 	ClientResponse
 	ClientRedirect
+	ClientConn
 	Heartbeat
 	Error
 )
 
 func (m MsgType) String() string {
 	switch m {
+	case Empty:
+		return "Empty"
 	case Prepare:
 		return "Prepare"
 	case Promise:
@@ -41,9 +45,22 @@ func (m MsgType) String() string {
 	return "INVALID"
 }
 
+type RequestInfo struct {
+	Id  int   `json:"id"`
+	No  int   `json:"no"`
+	Val Value `json:"val"`
+}
+
 type Msg struct {
-	Type    MsgType       `json:"type"`
-	Address string        `json:"address"`
-	Port    string        `json:"port"`
-	Args    []interface{} `json:"args"`
+	Type          MsgType `json:"type"`
+	FromAddress   string  `json:"fromaddress"`
+	FromPort      string  `json:"fromport"`
+	LeaderAddress string  `json:"leaderAddress"`
+	LeaderPort    string  `json:"leaderPort"`
+	Request       RequestInfo
+	Entry         int        `json:"entry"` // what entry in the log this is meant for
+	Round         int        `json:"round"`
+	Value         Value      `json:"value"`
+	RoundValue    RoundValue `json:"roundvalue"` // For Previous Value (is this necessary)
+	Error         string     `json:"error"`
 }

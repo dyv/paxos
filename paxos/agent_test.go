@@ -8,7 +8,7 @@ import (
 
 func TestNewAgent(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
-	a, err := NewAgent("36804")
+	a, err := NewAgent("36804", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
@@ -18,7 +18,7 @@ func TestNewAgent(t *testing.T) {
 
 func TestConnect(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
-	a, err := NewAgent("36804")
+	a, err := NewAgent("36804", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
@@ -44,7 +44,7 @@ func TestConnect(t *testing.T) {
 
 func TestRunAgent(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
-	a, err := NewAgent("36804")
+	a, err := NewAgent("36804", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
