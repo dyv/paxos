@@ -41,6 +41,11 @@ func NewClient() *Client {
 }
 
 func (c *Client) AddServer(addr, port string) {
+	for _, s := range c.Servers {
+		if s.addr == addr && s.port == port {
+			return
+		}
+	}
 	c.Servers = append(c.Servers, Server{addr, port})
 }
 
@@ -84,6 +89,10 @@ func (c *Client) Connect(s Server) error {
 	return err
 }
 
+func (c *Client) ConnectAddr(addr, port string) error {
+	return c.Connect(Server{addr, port})
+}
+
 func (c *Client) Redirect(addr, port string) error {
 	var err error
 	for _, s := range c.Servers {
@@ -99,24 +108,24 @@ func (c *Client) Redirect(addr, port string) error {
 }
 
 // this way they can also query for old values that they entered
-func (c *Client) RequestId(id int, val string) (string, error) {
+func (c *Client) RequestId(id int, val Value) (Value, error) {
 	log.Printf("CLIENT REQUEST: %v %v", id, val)
 request:
 	enc := json.NewEncoder(c.s)
 	var m Msg = Msg{Type: ClientRequest,
-		Request: RequestInfo{c.id, id, val, 0}}
+		Request: RequestInfo{c.id, id, val, 0, false}}
 	log.Print("Client Sending Request: ", m)
 	err := enc.Encode(m)
 	if err != nil {
 		log.Print("Error encoding client request:", err)
-		return "", err
+		return nil, err
 	}
 	dec := json.NewDecoder(c.s)
 	var resp Msg
 	err = dec.Decode(&resp)
 	if err != nil {
 		log.Print("Error Decoding Server Response:", err)
-		return "", err
+		return nil, err
 	}
 	if resp.Type == ClientRedirect {
 		c.Redirect(resp.LeaderAddress, resp.LeaderPort)
@@ -124,19 +133,52 @@ request:
 	}
 	if resp.Error != "" {
 		log.Print("Return Type Error")
-		return "failed", errors.New(resp.Error)
+		return nil, errors.New(resp.Error)
 	}
 	log.Print("Client Received Response: ", resp)
-	return resp.Value.(string), err
+	return resp.Value, err
 }
 
-func (c *Client) NewRequest(val string) (string, error) {
+func (c *Client) NewRequest(val Value) (Value, error) {
 	log.Printf("Sending New Request with ID: %v %v", c.reqno, val)
 	v, err := c.RequestId(c.reqno, val)
 	c.reqno++
 	return v, err
 }
 
-func (c *Client) Request(val string) (string, error) {
+func (c *Client) Request(val Value) (Value, error) {
 	return c.RequestId(c.reqno, val)
+}
+
+func (c *Client) GetLog() (<-chan Value, error) {
+	ch := make(chan Value)
+	enc := json.NewEncoder(c.s)
+	var m Msg = Msg{Type: LogRequest}
+	log.Print("Client Sending Log Request: ", m)
+	err := enc.Encode(m)
+	if err != nil {
+		log.Print("Error Encoding Log Request:", err)
+		return nil, err
+	}
+	go func() {
+		for {
+			dec := json.NewDecoder(c.s)
+			var resp Msg
+			err = dec.Decode(&resp)
+			if err != nil {
+				log.Print("Error Decoding Server Response:", err)
+				break
+			}
+			if resp.Type == Done {
+				break
+			}
+			if resp.Type != LogResponse {
+				log.Print("Received Invalid Response for GetLog")
+				continue
+			}
+			ch <- resp.Value
+		}
+		close(ch)
+	}()
+	return ch, nil
 }

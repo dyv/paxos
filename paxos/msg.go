@@ -13,7 +13,10 @@ const (
 	ClientResponse
 	ClientRedirect
 	ClientConn
+	LogRequest
+	LogResponse
 	Heartbeat
+	Done
 	Error
 )
 
@@ -51,6 +54,7 @@ type RequestInfo struct {
 	No    int   `json:"no"`
 	Val   Value `json:"val"`
 	Entry int   `json:"entry"`
+	NoSet bool  `json:"noset"` // flag to indicate that we should not set the value (we are only querying)
 }
 
 type Msg struct {

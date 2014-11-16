@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"path"
 	"regexp"
 	"sync"
@@ -78,6 +79,8 @@ type Agent struct {
 	clientLock *sync.Mutex
 	clientId   int                // the next id to assign
 	clients    map[int]ClientInfo // map client id to client info
+	// App: The Client Application Command to Run when we become the leader
+	Cmd *exec.Cmd
 }
 
 var ipv4Reg = regexp.MustCompile(`\d+\.\d+\.\d+\.\d+`)
@@ -143,6 +146,14 @@ func NewAgent(port string, try_recover bool) (*Agent, error) {
 	a.Values = NewValueLog(1000)
 	a.clients = make(map[int]ClientInfo)
 	return a, nil
+}
+
+func (a *Agent) RegisterExecCmd(cmd *exec.Cmd) {
+	a.Cmd = cmd
+}
+
+func (a *Agent) RegisterCmd(name string, arg ...string) {
+	a.RegisterExecCmd(exec.Command(name, arg...))
 }
 
 func (a *Agent) Close() {
@@ -212,6 +223,17 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 		}
 		var resp Msg
 		switch msg.Type {
+		case LogRequest:
+			for {
+				for entry, v := range a.Values.Log {
+					// if it is not committed get it first
+					if !v.Committed {
+						a.Request(v, RequestInfo{Entry: entry, NoSet: true})
+					}
+					enc.Encode(Msg{Type: LogResponse, Value: v})
+				}
+				enc.Encode(Msg{Type: Done})
+			}
 		case ClientRequest:
 			// if I am not the leader and there is a leader I defer to
 			// then redirect the client to them
@@ -231,8 +253,9 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 			cno := msg.Request.No
 			a.clientLock.Lock()
 			ci := a.clients[cid]
-			a.clientLock.Unlock()
 			if conn != ci.conn {
+
+				a.clientLock.Unlock()
 				log.Println("Malicious Client: Sending with Wrong IDs")
 				resp.Type = Error
 				resp.Error = "Malicious Client: Wrong ID"
@@ -245,12 +268,13 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 				log.Printf("Client Number: %+v", cno)
 				log.Printf("Client Request: %+v", ci.request[cno])
 				log.Printf("Value Associated: %+v", a.Values.Log[vi])
-
+				a.clientLock.Unlock()
 				// if we have handled this request before
 				resp.Type = ClientResponse
 				resp.Value = a.Values.Log[vi].Val
 				break
 			}
+			a.clientLock.Unlock()
 			a.Messages.Append(msg)
 			msg.Request.Entry = a.entry
 			a.entry++
@@ -374,7 +398,7 @@ func (a *Agent) handleMessage(m Msg, send bool) {
 	case Prepare:
 		a.Prepare(m.Round, m.Request, p, send)
 	case Promise:
-		a.Promise(m.Round, m.RoundValue, m.Request, p, send)
+		a.Promise(m.Round, m.RoundValue, m.Request, p, send, false)
 	case Nack:
 		a.Nack(m.Round, m.RoundValue, m.Request, p, send)
 	case AcceptRequest:
@@ -464,13 +488,19 @@ var RequestTimeout error = errors.New("paxos: request timed out")
 // sends preparation messages to a Quorum of Acceptors.
 func (a *Agent) Request(value Value, r RequestInfo) error {
 	log.Printf("Requesting Entry: %v", r.Entry)
+	log.Printf("Request Info: %v", r)
 	if r.Entry >= len(a.instances) {
 		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
 			a.instances = append(a.instances, NewPaxosInstance())
 		}
 	}
+	a.instances[r.Entry].myvalue = value
 
-	a.StartRequest(a.instances[r.Entry].round+1, value, r, true)
+	if !a.isLeader {
+		a.StartRequest(a.instances[r.Entry].round+1, value, r, true)
+	} else {
+		a.Promise(-1, RoundValue{}, r, Peer{a.addr, a.port, nil}, true, true)
+	}
 	// wait for this proposal to be accepted or a timeout to occur
 	timeout := make(chan bool)
 	go func() {
@@ -525,8 +555,11 @@ func (a *Agent) Prepare(n int, r RequestInfo, p Peer, send bool) {
 		}
 	}
 	instance := &a.instances[r.Entry]
-
 	if n > instance.round || (n == instance.round && instance.promisedRound == false) {
+		if r.NoSet {
+			log.Print("Not Allowed to Accept")
+			return
+		}
 		instance.round = n
 		instance.promisedRound = true
 		instance.acceptedRound = false
@@ -544,25 +577,33 @@ func (a *Agent) Prepare(n int, r RequestInfo, p Peer, send bool) {
 }
 
 // The Proposer receives several promises for this round
-func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool) {
-	log.Print("PROMISE: ", r.Entry, n, la, r, p, send)
-	// only accept promises for the round we are currently on
-	instance := &a.instances[r.Entry]
-	if n != instance.round {
-		log.Printf("r != instance.round: %v != %v", r, instance.round)
-		return
+func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool, shortcut bool) {
+	if r.Entry >= len(a.instances) {
+		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
+			a.instances = append(a.instances, NewPaxosInstance())
+		}
 	}
-	instance.round = n
-	if la.Round < 0 {
-		log.Print("My Value: ", instance.myvalue)
-		instance.votes[r.Val]++
-		instance.voted[p] = true
-	} else {
-		instance.votes[la.Val]++
-		instance.voted[p] = true
+
+	instance := &a.instances[r.Entry]
+	if !shortcut {
+		log.Print("PROMISE: ", r.Entry, n, la, r, p, send)
+		// only accept promises for the round we are currently on
+		if n != instance.round {
+			log.Printf("r != instance.round: %v != %v", r, instance.round)
+			return
+		}
+		instance.round = n
+		if la.Round < 0 {
+			log.Print("My Value: ", instance.myvalue)
+			instance.votes[r.Val]++
+			instance.voted[p] = true
+		} else {
+			instance.votes[la.Val]++
+			instance.voted[p] = true
+		}
 	}
 	// If we have been promised a quorum of votes
-	if a.Quorum(len(instance.voted)) {
+	if shortcut || a.Quorum(len(instance.voted)) {
 		log.Print("Quorum Has been Reached: ", r)
 		a.leaderLock.Lock()
 		a.isLeader = true
@@ -577,8 +618,6 @@ func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool) 
 				nv = v
 			}
 		}
-		// accept my own
-		instance.history = append(instance.history, RoundValue{n, mv})
 		for _, p := range a.peers {
 			log.Print("Sending Accept Request Message: ", mv)
 			p.Send(Msg{Type: AcceptRequest,
@@ -618,9 +657,11 @@ func (a *Agent) AcceptRequest(n int, v Value, r RequestInfo, p Peer, send bool) 
 	log.Print("ACCEPTREQUEST: ", n, v, r, p, send)
 	instance := &a.instances[r.Entry]
 	if n != instance.round {
+		log.Print("Not for the right round")
 		return
 	}
 	if instance.acceptedRound && instance.history[len(instance.history)-1].Val != v {
+		log.Print("Already Accepted")
 		return
 	}
 	instance.acceptedRound = true
