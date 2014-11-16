@@ -45,10 +45,12 @@ func (m MsgType) String() string {
 	return "INVALID"
 }
 
+// request info is the stuff that stays constant throughout all the messages
 type RequestInfo struct {
-	Id  int   `json:"id"`
-	No  int   `json:"no"`
-	Val Value `json:"val"`
+	Id    int   `json:"id"`
+	No    int   `json:"no"`
+	Val   Value `json:"val"`
+	Entry int   `json:"entry"`
 }
 
 type Msg struct {

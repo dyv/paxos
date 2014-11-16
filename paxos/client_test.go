@@ -50,7 +50,7 @@ func TestClientOneRequest(t *testing.T) {
 	t.Log("TESTED NEW CLIENT")
 }
 func TestClientNewRequest(t *testing.T) {
-	//log.SetOutput(ioutil.Discard)
+	log.SetOutput(ioutil.Discard)
 	t.Log("TESTING NEW CLIENT")
 	a, err := NewAgent("36820", false)
 	if err != nil {

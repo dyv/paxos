@@ -75,7 +75,7 @@ func (l *MsgLog) Recover(a *Agent, f *os.File) error {
 		// append the recovered message to the in memory log
 		l.Log = append(l.Log, m)
 		if m.Type == ClientRequest {
-			a.StartRequest(m.Entry, m.Round, m.Value, m.Request, false)
+			a.StartRequest(m.Round, m.Value, m.Request, false)
 		} else {
 			a.handleMessage(m, false)
 		}
@@ -113,7 +113,10 @@ func (l *MsgLog) Append(m Msg) {
 	l.Flush()
 }
 
-type ValueEntry Value
+type ValueEntry struct {
+	Committed bool
+	Val       Value
+}
 
 // A ValueLog is a sequence of Values that the the Paxos node has accepted
 // in the order that it has accepted it
@@ -127,6 +130,16 @@ func NewValueLog(sz int) *ValueLog {
 	return l
 }
 
+func (l *ValueLog) InsertAt(i int, v Value) {
+	if i >= len(l.Log) {
+		t := make([]ValueEntry, ((i+1)*3)/2)
+		copy(t, l.Log)
+		l.Log = t
+
+	}
+	l.Log[i] = ValueEntry{true, v}
+}
+
 func (l *ValueLog) Append(v Value) {
-	l.Log = append(l.Log, v)
+	l.Log = append(l.Log, ValueEntry{true, v})
 }

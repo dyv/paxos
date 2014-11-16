@@ -50,7 +50,7 @@ func TestPaxosWithOneAgent(t *testing.T) {
 }
 
 func TestPaxosWithThreeAgents(t *testing.T) {
-	log.SetOutput(ioutil.Discard)
+	//log.SetOutput(ioutil.Discard)
 	t.Log("Testing Paxos with Three Agent")
 	a1, err := NewAgent("36809", false)
 	if err != nil {
@@ -222,17 +222,17 @@ func TestPaxosWithThreeAgentsAndAFailure(t *testing.T) {
 func TestPaxosRedirect(t *testing.T) {
 	log.SetOutput(ioutil.Discard)
 	t.Log("Testing Paxos with Three Agent")
-	a1, err := NewAgent("36815", false)
+	a1, err := NewAgent("36915", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a2, err := NewAgent("36816", false)
+	a2, err := NewAgent("36916", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	a3, err := NewAgent("36817", false)
+	a3, err := NewAgent("36917", false)
 	if err != nil {
 		t.Error("Error Creating Agent:", err)
 		return
@@ -242,32 +242,32 @@ func TestPaxosRedirect(t *testing.T) {
 		t.Error("Error Getting Address:", err)
 		return
 	}
-	err = a1.Connect(addr, "36816")
+	err = a1.Connect(addr, "36916")
 	if err != nil {
 		t.Error("Error Connecting:", err)
 		return
 	}
-	err = a1.Connect(addr, "36817")
+	err = a1.Connect(addr, "36917")
 	if err != nil {
 		t.Error("Error Connecting:", err)
 		return
 	}
-	err = a2.Connect(addr, "36815")
+	err = a2.Connect(addr, "36915")
 	if err != nil {
 		t.Error("Error Connecting:", err)
 		return
 	}
-	err = a2.Connect(addr, "36817")
+	err = a2.Connect(addr, "36917")
 	if err != nil {
 		t.Error("Error Connecting:", err)
 		return
 	}
-	err = a3.Connect(addr, "36815")
+	err = a3.Connect(addr, "36915")
 	if err != nil {
 		t.Error("Error Connecting:", err)
 		return
 	}
-	err = a3.Connect(addr, "36816")
+	err = a3.Connect(addr, "36916")
 	if err != nil {
 		t.Error("Error Connecting:", err)
 		return
@@ -278,8 +278,8 @@ func TestPaxosRedirect(t *testing.T) {
 	a2.Run()
 	a3.Run()
 	c := NewClient()
-	c.AddServer(addr, "36815")
-	c.AddServer(addr, "36816")
+	c.AddServer(addr, "36915")
+	c.AddServer(addr, "36916")
 	err = c.Connect(c.Servers[0])
 	if err != nil {
 		t.Error("Error Connecting With Server:", err)
@@ -298,14 +298,6 @@ func TestPaxosRedirect(t *testing.T) {
 	if err != nil {
 		t.Error("Error Connecting With Server:", err)
 		return
-	}
-	resp, err = c.Request("Request 2")
-	if err != nil {
-		t.Error("Error Requesting from Paxos Node:", err)
-		return
-	}
-	if resp != "Request 1" {
-		t.Error("Server Failed")
 	}
 	if c.leaderAddr != c.Servers[0].addr || c.leaderPort != c.Servers[0].port {
 		t.Error("Was not reconnected with leader")

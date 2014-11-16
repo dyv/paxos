@@ -1,3 +1,15 @@
+Refactoring. When running Paxos, we must maintain state for each of the log
+entries (as if it were its own version of paxos). This means that we want to
+turn almost all of the members of Agent into arrays. This way, instead of
+voting for a specific value, instead we are voting for a specific value for a
+specific slot.
+    Add in a EntryPaxos struct that stores votes, voted, myvalue, history,
+    acceptedRound, promisedRound, naccepted, accepted, done
+
+Refactor so if I am leader I do not go through all Prepare and Promise steps,
+         instead only go through the Accept and Accepted steps
+         Make it so we only accept from our leader
+
 If entry > previous entries || round > previous rounds then accept this new
 value
 Need to treat these new values as new instances of paxos

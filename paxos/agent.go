@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sync"
 	"time"
 )
 
@@ -24,10 +25,6 @@ func init() {
 type RoundValue struct {
 	Round int   `json:"round"`
 	Val   Value `json:"value"`
-}
-
-func iMapToRV(m map[string]interface{}) RoundValue {
-	return RoundValue{m["round"].(int), m["value"].(Value)}
 }
 
 // a client should have a sequence of requests that are dispersed
@@ -54,42 +51,33 @@ var MaxLog int = 200000
 type Agent struct {
 	Peer
 	udpaddr    *net.UDPAddr
-	round      int
 	peers      []Peer // Deprecate
 	addrToPeer map[string]Peer
+	// Each of the following members are slices so that way we have history for
+	// each log entry we are trying to fill.
 	// votes is the number of votes we have recieved in this round
 	// for each given value
-	votes   map[Value]int
-	voted   map[Peer]bool // consider making similar struct for accepted
-	myvalue Value
-	// history is a list of our history of accepted values
-	history       []RoundValue
-	acceptedRound bool
-	promisedRound bool
-	// naccepted is the number of peers that have accepted the
-	// current proposal
-	naccepted int
-	// channel to indicate when the reuqest's proposal is accepted
-	accepted       chan bool
-	done           chan bool
+	instances      []PaxosInstance
 	servingClients bool
 	servingAgents  bool
-	AcceptedValue  Value
 	// leader election for efficiency and multi-paxos
+	leaderLock    *sync.Mutex
 	isLeader      bool             // is this current node the leader
 	leader        *Peer            // who is the current leader (for redirects)
 	leaderCurrent bool             // is the leader current (every T seconds check)
 	leaderTimeout <-chan time.Time // how long before the leader is invalidated
 	heartbeat     <-chan time.Time // how long before leader should send another message
+	done          chan bool
 	// Logging Functionality
 	// log for remembering whether we have committed something to an entry in
 	// the log, whether we have promised it, or whether we have prepared
 	// something for it, or whether
-	Messages *MsgLog
-	Values   *ValueLog
-	entry    int
-	clientId int                // the next id to assign
-	clients  map[int]ClientInfo // map client id to client info
+	Messages   *MsgLog
+	Values     *ValueLog
+	entry      int
+	clientLock *sync.Mutex
+	clientId   int                // the next id to assign
+	clients    map[int]ClientInfo // map client id to client info
 }
 
 var ipv4Reg = regexp.MustCompile(`\d+\.\d+\.\d+\.\d+`)
@@ -132,6 +120,8 @@ func NewAgent(port string, try_recover bool) (*Agent, error) {
 		log.Println("Error Getting Address:", err)
 		return nil, errors.New("Cannot Resolve Local IP Address")
 	}
+	a.leaderLock = &sync.Mutex{}
+	a.clientLock = &sync.Mutex{}
 	a.addr = addr
 	a.port = port
 	a.udpaddr, err = net.ResolveUDPAddr("udp", net.JoinHostPort(a.addr, port))
@@ -139,12 +129,12 @@ func NewAgent(port string, try_recover bool) (*Agent, error) {
 		log.Print("Error resolving UDP address")
 		return nil, err
 	}
-	a.round = -1
 	a.peers = make([]Peer, 0, 10)
 	a.addrToPeer = make(map[string]Peer)
-	a.accepted = make(chan bool)
-	a.Connect(a.addr, a.port)
+	// vote metadata
 	a.done = make(chan bool)
+	a.instances = make([]PaxosInstance, 0)
+	a.Connect(a.addr, a.port)
 	a.Messages, err = NewMsgLog(1000, path.Join("logs", net.JoinHostPort(a.addr, port)), a, try_recover)
 	if err != nil {
 		log.Print("Error Initializing Message Log: ", err)
@@ -168,10 +158,10 @@ func (a *Agent) Close() {
 
 // newRound initializes a new round for this proposer. It clears the recorded
 // votes and accepted.
-func (a *Agent) newRound() {
-	a.voted = make(map[Peer]bool)
-	a.votes = make(map[Value]int)
-	a.naccepted = 0
+func (a *Agent) newRound(entry int) {
+	a.instances[entry].voted = make(map[Peer]bool)
+	a.instances[entry].votes = make(map[Value]int)
+	a.instances[entry].naccepted = 0
 }
 
 // Connect connects to a Paxos Agent at a given address and port.
@@ -225,37 +215,61 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 		case ClientRequest:
 			// if I am not the leader and there is a leader I defer to
 			// then redirect the client to them
+			a.leaderLock.Lock()
 			if !a.isLeader && a.leader != nil {
 				// if there is a leader send a redirect to that peer
+				log.Print("Redirecting Client to Leader")
 				resp.Type = ClientRedirect
 				resp.LeaderAddress = a.leader.addr
 				resp.LeaderPort = a.leader.port
+				a.leaderLock.Unlock()
 				enc.Encode(resp)
 				return
 			}
+			a.leaderLock.Unlock()
 			cid := msg.Request.Id
 			cno := msg.Request.No
+			a.clientLock.Lock()
 			ci := a.clients[cid]
+			a.clientLock.Unlock()
 			if conn != ci.conn {
 				log.Println("Malicious Client: Sending with Wrong IDs")
 				resp.Type = Error
 				resp.Error = "Malicious Client: Wrong ID"
 				break
 			}
+			log.Printf("HISTORY: %+v, client no: %+v", ci, cno)
 			if vi, ok := ci.request[cno]; ok {
+				log.Print("Passing Back Previous Response: ", ci.request[cno])
+				log.Printf("Index: %+v", vi)
+				log.Printf("Client Number: %+v", cno)
+				log.Printf("Client Request: %+v", ci.request[cno])
+				log.Printf("Value Associated: %+v", a.Values.Log[vi])
+
 				// if we have handled this request before
 				resp.Type = ClientResponse
-				resp.Value = a.Values.Log[vi]
+				resp.Value = a.Values.Log[vi].Val
 				break
 			}
 			a.Messages.Append(msg)
+			msg.Request.Entry = a.entry
+			a.entry++
 			err = a.Request(msg.Value, msg.Request)
 			if err != nil {
 				resp.Type = Error
 				resp.Error = err.Error()
 			} else {
+				vi := ci.request[cno]
+				log.Print("Generated Entry")
+				log.Printf("Index: %+v", vi)
+				log.Printf("Client Number: %+v", cno)
+				log.Printf("Client Request: %+v", ci.request[cno])
+				log.Printf("Value Associated: %+v", a.Values.Log[vi])
+				log.Printf("Log: %+v", a.Values.Log)
+				// if we have handled this request before
 				resp.Type = ClientResponse
-				resp.Value = a.AcceptedValue
+				resp.Value = a.Values.Log[vi].Val
+				break
 			}
 		default:
 			err = fmt.Errorf("Invalid Message Type: %v", msg.Type)
@@ -294,19 +308,24 @@ func (a *Agent) ServeClients() error {
 			enc := json.NewEncoder(conn)
 			var resp Msg
 			// if there is a leader then redirect to that leader
+			a.leaderLock.Lock()
 			if !a.isLeader && a.leader != nil {
 				resp.Type = ClientRedirect
 				resp.LeaderAddress = a.leader.addr
 				resp.LeaderPort = a.leader.port
+				a.leaderLock.Unlock()
 				enc.Encode(resp)
 				return
 			} else {
+				a.leaderLock.Unlock()
 				resp.Type = ClientConn
 				resp.Request.No = 0
+				a.clientLock.Lock()
 				resp.Request.Id = a.clientId
 				a.clients[a.clientId] = ClientInfo{id: a.clientId,
 					reqno: 0, request: make(map[int]int), conn: conn}
 				a.clientId++
+				a.clientLock.Unlock()
 				enc.Encode(resp)
 			}
 			go a.handleClientRequest(conn)
@@ -317,9 +336,12 @@ func (a *Agent) ServeClients() error {
 
 func (a *Agent) SendHeartbeat() {
 	// if I am not a leader don't spam and send heartbeats
+	a.leaderLock.Lock()
 	if !a.isLeader {
+		a.leaderLock.Unlock()
 		return
 	}
+	a.leaderLock.Unlock()
 	for _, p := range a.peers {
 		p.Send(Msg{Type: Heartbeat, FromAddress: a.addr, FromPort: a.port}, true)
 	}
@@ -350,15 +372,15 @@ func (a *Agent) handleMessage(m Msg, send bool) {
 			a.leaderCurrent = true
 		}
 	case Prepare:
-		a.Prepare(m.Entry, m.Round, m.Request, p, send)
+		a.Prepare(m.Round, m.Request, p, send)
 	case Promise:
-		a.Promise(m.Entry, m.Round, m.RoundValue, m.Request, p, send)
+		a.Promise(m.Round, m.RoundValue, m.Request, p, send)
 	case Nack:
-		a.Nack(m.Entry, m.Round, m.RoundValue, m.Request, p, send)
+		a.Nack(m.Round, m.RoundValue, m.Request, p, send)
 	case AcceptRequest:
-		a.AcceptRequest(m.Entry, m.Round, m.Value, m.Request, p, send)
+		a.AcceptRequest(m.Round, m.Value, m.Request, p, send)
 	case Accepted:
-		a.Accepted(m.Entry, m.Round, m.Value, m.Request, p, send)
+		a.Accepted(m.Round, m.Value, m.Request, p, send)
 	default:
 		log.Println("Received Message With Bad Type")
 	}
@@ -441,28 +463,33 @@ var RequestTimeout error = errors.New("paxos: request timed out")
 // receives a Request RPC it takes the role of the proposer. As proposer it
 // sends preparation messages to a Quorum of Acceptors.
 func (a *Agent) Request(value Value, r RequestInfo) error {
-	log.Print("Request Received: ", a.round+1)
-	a.StartRequest(0, a.round+1, value, r, true)
+	log.Printf("Requesting Entry: %v", r.Entry)
+	if r.Entry >= len(a.instances) {
+		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
+			a.instances = append(a.instances, NewPaxosInstance())
+		}
+	}
+
+	a.StartRequest(a.instances[r.Entry].round+1, value, r, true)
 	// wait for this proposal to be accepted or a timeout to occur
 	timeout := make(chan bool)
 	go func() {
 		time.Sleep(1 * time.Second)
 		timeout <- true
 	}()
+	log.Print("WAITING ON: ", a.instances[r.Entry].accepted)
 	select {
-	case <-a.accepted:
+	case <-a.instances[r.Entry].accepted:
 		return nil
 	case <-timeout:
 		return RequestTimeout
 	}
 }
 
-func (a *Agent) StartRequest(entry int, round int, value Value, r RequestInfo, send bool) {
-	a.newRound()
-	a.myvalue = value
-	a.round = round
-	a.promisedRound = false
-	a.acceptedRound = false
+func (a *Agent) StartRequest(round int, value Value, r RequestInfo, send bool) {
+	// make a new round for this specific entry
+	a.newRound(r.Entry)
+	a.instances[r.Entry].myvalue = value
 	for _, p := range a.peers {
 		log.Print("Sending Prepare Message with Round: ", round)
 		p.Send(Msg{Type: Prepare,
@@ -477,12 +504,12 @@ var NoValue RoundValue = RoundValue{-1, -1}
 // LastAccepted is a function that returns the last RoundValue that has been
 // accepted by this agent and commited to its history. If no value was
 // previously committed to this agent's history it returns a NoValue.
-func (a *Agent) LastAccepted() RoundValue {
-	l := len(a.history)
+func (a *Agent) LastAccepted(entry int) RoundValue {
+	l := len(a.instances[entry].history)
 	if l == 0 {
 		return NoValue
 	}
-	return a.history[l-1]
+	return a.instances[entry].history[l-1]
 }
 
 // Prepare sends an either a Promise or a Nack to the peer that sent the
@@ -490,58 +517,68 @@ func (a *Agent) LastAccepted() RoundValue {
 // accepted anything else, then it sends a Promise, which reserves this value
 // to be the one that the Proposer requests. Otherwise the Agent sends a Nack
 // response to the Proposer signifying that this slot has already been taken.
-func (a *Agent) Prepare(entry int, n int, r RequestInfo, p Peer, send bool) {
-	log.Print("PREPARE: ", entry, n, r, p, send)
-	if n > a.round || (n == a.round && a.promisedRound == false) {
-		a.round = n
-		a.promisedRound = true
-		a.acceptedRound = false
+func (a *Agent) Prepare(n int, r RequestInfo, p Peer, send bool) {
+	log.Print("PREPARE: ", n, r, p, send)
+	if r.Entry >= len(a.instances) {
+		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
+			a.instances = append(a.instances, NewPaxosInstance())
+		}
+	}
+	instance := &a.instances[r.Entry]
+
+	if n > instance.round || (n == instance.round && instance.promisedRound == false) {
+		instance.round = n
+		instance.promisedRound = true
+		instance.acceptedRound = false
 		p.Send(Msg{Type: Promise,
 			FromAddress: a.addr, FromPort: a.port,
 			Request: r,
-			Round:   n, RoundValue: a.LastAccepted()}, send)
+			Round:   n, RoundValue: a.LastAccepted(r.Entry)}, send)
 	} else {
-		log.Printf("%v, %v, %v", n, a.round, a.promisedRound)
+		log.Printf("NACK: %v, %v, %v", n, instance.round, instance.promisedRound)
 		p.Send(Msg{Type: Nack,
 			FromAddress: a.addr, FromPort: a.port,
 			Request: r,
-			Round:   n, RoundValue: a.LastAccepted()}, send)
+			Round:   n, RoundValue: a.LastAccepted(r.Entry)}, send)
 	}
 }
 
 // The Proposer receives several promises for this round
-func (a *Agent) Promise(entry, n int, la RoundValue, r RequestInfo, p Peer, send bool) {
-	log.Print("PROMISE: ", entry, n, la, r, p, send)
+func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool) {
+	log.Print("PROMISE: ", r.Entry, n, la, r, p, send)
 	// only accept promises for the round we are currently on
-	if n != a.round {
-		log.Printf("r != a.round: %v != %v", r, a.round)
+	instance := &a.instances[r.Entry]
+	if n != instance.round {
+		log.Printf("r != instance.round: %v != %v", r, instance.round)
 		return
 	}
-	a.round = n
+	instance.round = n
 	if la.Round < 0 {
-		log.Print("My Value: ", a.myvalue)
-		a.votes[r.Val]++
-		a.voted[p] = true
+		log.Print("My Value: ", instance.myvalue)
+		instance.votes[r.Val]++
+		instance.voted[p] = true
 	} else {
-		a.votes[la.Val]++
-		a.voted[p] = true
+		instance.votes[la.Val]++
+		instance.voted[p] = true
 	}
 	// If we have been promised a quorum of votes
-	if a.Quorum(len(a.voted)) {
+	if a.Quorum(len(instance.voted)) {
 		log.Print("Quorum Has been Reached: ", r)
+		a.leaderLock.Lock()
 		a.isLeader = true
 		a.leader = &a.Peer
+		a.leaderLock.Unlock()
 		// get the value that has the most votes
 		mv := r.Val
 		nv := 0
-		for k, v := range a.votes {
+		for k, v := range instance.votes {
 			if v > nv {
 				mv = k
 				nv = v
 			}
 		}
 		// accept my own
-		a.history = append(a.history, RoundValue{n, mv})
+		instance.history = append(instance.history, RoundValue{n, mv})
 		for _, p := range a.peers {
 			log.Print("Sending Accept Request Message: ", mv)
 			p.Send(Msg{Type: AcceptRequest,
@@ -551,45 +588,51 @@ func (a *Agent) Promise(entry, n int, la RoundValue, r RequestInfo, p Peer, send
 		}
 		return
 	}
-	log.Print("Not at Quorum: ", a.voted)
+	log.Print("Not at Quorum: ", instance.voted)
 }
 
-func (a *Agent) Nack(entry, n int, rv RoundValue, r RequestInfo, p Peer, send bool) {
-	log.Print("NACK: ", entry, n, rv, r, p, send)
+func (a *Agent) Nack(n int, rv RoundValue, r RequestInfo, p Peer, send bool) {
+	log.Print("NACK: ", n, rv, r, p, send)
+	a.leaderLock.Lock()
 	a.isLeader = false
+	a.leaderLock.Unlock()
+	instance := &a.instances[r.Entry]
 	// if we have recieved a nack for a greater round than this
-	if rv.Round > a.round {
+	if rv.Round > instance.round {
 		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
-		a.StartRequest(entry, rv.Round+1, rv.Val, r, send)
+		a.StartRequest(rv.Round+1, rv.Val, r, send)
 	}
-	if n < a.round {
+	if n < instance.round {
 		return
 	}
-	a.newRound()
+	a.newRound(r.Entry)
 	for _, p := range a.peers {
 		p.Send(Msg{Type: Prepare,
 			FromAddress: a.addr, FromPort: a.port,
 			Request: r,
-			Round:   a.round}, send)
+			Round:   instance.round}, send)
 	}
 }
 
-func (a *Agent) AcceptRequest(entry, n int, v Value, r RequestInfo, p Peer, send bool) {
-	log.Print("ACCEPTREQUEST: ", entry, n, v, r, p, send)
-	if n != a.round {
+func (a *Agent) AcceptRequest(n int, v Value, r RequestInfo, p Peer, send bool) {
+	log.Print("ACCEPTREQUEST: ", n, v, r, p, send)
+	instance := &a.instances[r.Entry]
+	if n != instance.round {
 		return
 	}
-	if a.acceptedRound && a.history[len(a.history)-1].Val != v {
+	if instance.acceptedRound && instance.history[len(instance.history)-1].Val != v {
 		return
 	}
-	a.acceptedRound = true
-	a.AcceptedValue = v
-	a.history = append(a.history, RoundValue{n, v})
+	instance.acceptedRound = true
+	instance.AcceptedValue = v
+	instance.history = append(instance.history, RoundValue{n, v})
 	// if we are not responding to our own request
 	if p.addr != a.addr || p.port != a.port {
 		// when I send back a set request say that they are the leader
+		a.leaderLock.Lock()
 		a.leader = &p
 		a.isLeader = false
+		a.leaderLock.Unlock()
 	}
 	p.Send(Msg{Type: Accepted,
 		FromAddress: a.addr, FromPort: a.port,
@@ -597,20 +640,26 @@ func (a *Agent) AcceptRequest(entry, n int, v Value, r RequestInfo, p Peer, send
 		Round:   n, Value: v}, send)
 }
 
-func (a *Agent) Accepted(entry, n int, v Value, r RequestInfo, p Peer, send bool) {
-	log.Print("ACCEPTED: ", entry, n, v, r, p, send)
-	if n != a.round {
+func (a *Agent) Accepted(n int, v Value, r RequestInfo, p Peer, send bool) {
+	log.Printf("ACCEPTED: %+v", r)
+	instance := &a.instances[r.Entry]
+	if n != instance.round {
 		return
 	}
-	a.naccepted++
-	if a.Quorum(a.naccepted) {
-		a.AcceptedValue = v
-		a.history = append(a.history, RoundValue{n, v})
-		log.Print("Appended to History")
-		a.Values.Append(v)
-		a.clients[r.Id].request[r.No] = len(a.Values.Log) - 1
+	instance.naccepted++
+	if a.Quorum(instance.naccepted) {
+		instance.AcceptedValue = v
+		instance.history = append(instance.history, RoundValue{n, v})
+		log.Print("APPENDED to History: ", v)
+		log.Printf("Adding to Values: %+v %+v", r.Entry, v)
+		log.Printf("Values prior: %+v", a.Values)
+		a.Values.InsertAt(r.Entry, v)
+		log.Printf("Values After: %+v", a.Values)
+		a.clientLock.Lock()
+		a.clients[r.Id].request[r.No] = r.Entry
 		log.Print("Client Request: ", a.clients[r.Id])
+		a.clientLock.Unlock()
 		// need to add it to the history (pass around client id and reqno?)
-		a.accepted <- true
+		instance.accepted <- true
 	}
 }

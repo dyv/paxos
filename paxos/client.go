@@ -104,7 +104,7 @@ func (c *Client) RequestId(id int, val string) (string, error) {
 request:
 	enc := json.NewEncoder(c.s)
 	var m Msg = Msg{Type: ClientRequest,
-		Request: RequestInfo{c.id, c.reqno, val}}
+		Request: RequestInfo{c.id, id, val, 0}}
 	log.Print("Client Sending Request: ", m)
 	err := enc.Encode(m)
 	if err != nil {
