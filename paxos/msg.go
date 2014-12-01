@@ -13,6 +13,7 @@ const (
 	ClientResponse
 	ClientRedirect
 	ClientConn
+	ClientConnectRequest
 	LogRequest
 	LogResponse
 	ClientApp
@@ -44,6 +45,8 @@ func (m MsgType) String() string {
 		return "Redirect"
 	case ClientConn:
 		return "ClientConn"
+	case ClientConnectRequest:
+		return "ClientConnectRequest"
 	case LogRequest:
 		return "LogRequest"
 	case LogResponse:

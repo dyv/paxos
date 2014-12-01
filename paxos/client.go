@@ -12,15 +12,17 @@ import (
 // the distributed Paxos store
 type Client struct {
 	// server is the node that it connects to
-	s          net.Conn
-	server     Server
-	enc        *json.Encoder
-	dec        *json.Decoder
-	LeaderAddr string
-	LeaderPort string
+	s            net.Conn
+	server       Server
+	server_index int
+	enc          *json.Encoder
+	dec          *json.Decoder
+	LeaderAddr   string
+	LeaderPort   string
 	// servers are "address:port" strings
-	Servers map[Server]bool
-	Retries int
+	Servers      map[Server]int // map to index
+	ServersSlice []Server
+	Retries      int
 	// ID
 	id    int // id for the current client connection
 	reqno int // request number
@@ -30,8 +32,8 @@ type Client struct {
 
 func NewClient() *Client {
 	c := new(Client)
-	c.Servers = make(map[Server]bool, 0)
-	c.Retries = 10
+	c.Servers = make(map[Server]int, 0)
+	c.Retries = 1
 	c.example_value = NewStrReq("")
 	return c
 }
@@ -41,19 +43,25 @@ func (c *Client) RegisterExampleValue(ex EncoderDecoder) {
 }
 
 func (c *Client) AddServer(addr, port string) {
-	c.Servers[Server{addr, port}] = true
+	if _, ok := c.Servers[Server{addr, port}]; !ok {
+		c.ServersSlice = append(c.ServersSlice, Server{addr, port})
+		c.Servers[Server{addr, port}] = len(c.ServersSlice) - 1
+	}
 }
 
 func (c *Client) Connect(s Server) error {
 	c.server = s
-	c.Servers[s] = true
+	c.AddServer(s.addr, s.port)
 	var err error
 	// exponential backoff
 	tried := startTimeout
 	for i := 0; i < c.Retries; i++ {
-		c.s, err = net.Dial("tcp", net.JoinHostPort(s.addr, s.port))
+		log.Println("Trying to Connect: ", s, i, c.Retries)
+		ns, err := net.Dial("tcp", net.JoinHostPort(s.addr, s.port))
 		if err == nil {
-			log.Print("Successfully Connected")
+			c.s = ns
+			c.server = s
+			log.Println("Successfully Connected")
 			break
 		}
 		time.Sleep(tried)
@@ -62,42 +70,68 @@ func (c *Client) Connect(s Server) error {
 			tried = endTimeout
 		}
 	}
+	if err != nil {
+		log.Println("Err != nil: Connecting To New")
+		return c.ConnectNew()
+	}
+	log.Println("Connected:", c.s, c.server)
 	c.enc = json.NewEncoder(c.s)
 	c.dec = json.NewDecoder(c.s)
+	// tell server we are trying to connect
+	c.enc.Encode(Msg{Type: ClientConnectRequest})
+	log.Println("Decoding Response:")
 	var resp Msg
 	err = c.dec.Decode(&resp)
+	log.Println("First Response Received")
 	if err != nil {
-		log.Print("Error Decoding Server Response:", err)
+		log.Println("Error Decoding Server Response:", err)
+		c.ConnectNew()
 		return err
 	}
 	if resp.Type == ClientRedirect {
+		log.Println("Redirect Received")
+		err := c.s.Close()
+		if err != nil {
+			log.Println("ERROR: Closed Paxos Connection with Error:", err)
+		}
+		//c.s = nil
 		return c.Redirect(resp.LeaderAddress, resp.LeaderPort)
 	}
 	if resp.Type == ClientConn {
-		log.Print("Recieived Connection Information: ")
+		log.Println("Recieived Connection Information: ")
 		c.id = resp.Request.Id
 		c.reqno = resp.Request.No
-		log.Print(c.id, c.reqno)
+		log.Println(c.id, c.reqno)
 	}
 	c.LeaderAddr = s.addr
 	c.LeaderPort = s.port
+	log.Println("Connected With Error: ", err)
 	return err
 }
 
 func (c *Client) ConnectFirst() error {
-	for s := range c.Servers {
-		return c.Connect(s)
+	if len(c.ServersSlice) == 0 {
+		return errors.New("No Servers Availible")
 	}
-	return errors.New("No Servers")
+	return c.Connect(c.ServersSlice[0])
 }
 
 func (c *Client) ConnectNew() error {
-	for s := range c.Servers {
-		if c.server != s {
-			return c.Connect(s)
+	if c.s != nil {
+		err := c.s.Close()
+		if err != nil {
+			log.Println("Error Closing Connection")
 		}
 	}
-	return errors.New("No New Server Found")
+	if c.s == nil {
+		log.Println("c.s == nil")
+		return c.ConnectFirst()
+	}
+	index := c.Servers[c.server]
+	s := c.ServersSlice[(index+1)%len(c.ServersSlice)]
+	err := c.Connect(s)
+	log.Println("Connect New:", err)
+	return err
 }
 
 func (c *Client) ConnectAddr(addr, port string) error {
@@ -136,6 +170,9 @@ request:
 		return nil, err
 	}
 	if resp.Type == ClientRedirect {
+		log.Println("Received Redirect")
+		c.s.Close()
+		//c.s = nil
 		c.Redirect(resp.LeaderAddress, resp.LeaderPort)
 		goto request
 	}

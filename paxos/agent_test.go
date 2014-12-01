@@ -50,6 +50,6 @@ func TestRunAgent(t *testing.T) {
 		return
 	}
 	t.Log("Agent Created:", a)
-	defer a.Close()
 	a.Run()
+	a.Close()
 }

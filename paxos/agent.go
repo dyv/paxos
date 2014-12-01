@@ -206,7 +206,15 @@ func (a *Agent) Close() {
 	if a.servingClients {
 		a.done <- true
 	}
+	if a.Cmd != nil && a.Cmd.Process != nil {
+		err := a.Cmd.Process.Kill()
+		if err != nil {
+			log.Println("Error Killing Process")
+		}
+	}
+	a.isLeader = false
 	log.Println("Closed Agent")
+	//os.Exit(0)
 }
 
 // newRound initializes a new round for this proposer. It clears the recorded
@@ -271,8 +279,9 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 		var msg Msg
 		err := dec.Decode(&msg)
 		if err != nil {
-			log.Print("Error Decoding Request: ", err)
+			log.Print("Error Decoding Request: ", err, conn.RemoteAddr(), conn.LocalAddr())
 			enc.Encode("Error Decoding from Connection: " + err.Error())
+			conn.Close()
 			return
 		}
 		var resp Msg
@@ -286,6 +295,36 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 			log.Printf("Application Response Received: %#v, #%d\n", msg.Value, msg.Entry)
 			a.instances[msg.Entry].Result = msg.Value
 			a.instances[msg.Entry].resultset <- true
+		case ClientConnectRequest:
+			log.Println("Received Connect Request")
+			// if there is a leader then redirect to that leader
+			a.leaderLock.Lock()
+			if !a.isLeader && a.leader != nil {
+				log.Println("Redirecting Client")
+				resp.Type = ClientRedirect
+				resp.LeaderAddress = a.leader.addr
+				resp.LeaderPort = a.leader.port
+				a.leaderLock.Unlock()
+				enc.Encode(resp)
+				log.Println("Closing Connection")
+				err := conn.Close()
+				if err != nil {
+					log.Println("ERROR: Paxos Closed Client Connection With Error: %v")
+				}
+				log.Println("Closed Connection")
+				return
+			} else {
+				log.Println("Accepted Client")
+				a.leaderLock.Unlock()
+				resp.Type = ClientConn
+				resp.Request.No = 0
+				a.clientLock.Lock()
+				resp.Request.Id = a.clientId
+				a.clients[a.clientId] = ClientInfo{id: a.clientId,
+					reqno: 0, request: make(map[int]int), conn: conn}
+				a.clientId++
+				a.clientLock.Unlock()
+			}
 		case ClientRequest:
 			// if I am not the leader and there is a leader I defer to
 			// then redirect the client to them
@@ -298,6 +337,10 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 				resp.LeaderPort = a.leader.port
 				a.leaderLock.Unlock()
 				enc.Encode(resp)
+				err := conn.Close()
+				if err != nil {
+					log.Println("ERROR: handleClientRequest: Error Closing Client Connection:", err)
+				}
 				return
 			}
 			a.leaderLock.Unlock()
@@ -315,11 +358,6 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 			//log.Printf("HISTORY: %+v, client no: %+v", ci, cno)
 			if vi, ok := ci.request[cno]; ok {
 				log.Print("Passing Back Previous Response: ", ci.request[cno])
-				//log.Printf("Index: %+v", vi)
-				//log.Printf("Client Number: %+v", cno)
-				//log.Printf("Client Request: %+v", ci.request[cno])
-				//log.Printf("Value Associated: %+v", a.instances[vi].Result)
-				//log.Printf("Log: %+v", a.instances[vi])
 				a.clientLock.Unlock()
 				// if we have handled this request before
 				resp.Type = ClientResponse
@@ -339,11 +377,6 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 			} else {
 				vi := ci.request[cno]
 				log.Print("Generated Entry")
-				//log.Printf("Index: %+v", vi)
-				//log.Printf("Client Number: %+v", cno)
-				//log.Printf("Client Request: %+v", ci.request[cno])
-				//log.Printf("Value Associated: %+v", a.instances[vi].Result)
-				//log.Printf("Log: %+v", a.instances[vi])
 				resp.Type = ClientResponse
 				resp.Value = a.instances[vi].Result
 				break
@@ -381,29 +414,6 @@ func (a *Agent) ServeClients() error {
 			if err != nil {
 				log.Print("Error Accepting Connection:", err)
 				return
-			}
-			enc := json.NewEncoder(conn)
-			var resp Msg
-			// if there is a leader then redirect to that leader
-			a.leaderLock.Lock()
-			if !a.isLeader && a.leader != nil {
-				resp.Type = ClientRedirect
-				resp.LeaderAddress = a.leader.addr
-				resp.LeaderPort = a.leader.port
-				a.leaderLock.Unlock()
-				enc.Encode(resp)
-				return
-			} else {
-				a.leaderLock.Unlock()
-				resp.Type = ClientConn
-				resp.Request.No = 0
-				a.clientLock.Lock()
-				resp.Request.Id = a.clientId
-				a.clients[a.clientId] = ClientInfo{id: a.clientId,
-					reqno: 0, request: make(map[int]int), conn: conn}
-				a.clientId++
-				a.clientLock.Unlock()
-				enc.Encode(resp)
 			}
 			go a.handleClientRequest(conn)
 		}
@@ -496,7 +506,7 @@ func (a *Agent) ServeAgents() error {
 					a.leader = nil
 				}
 				a.leaderCurrent = false
-				log.Println("Sending heartbeat")
+				//log.Println("Sending heartbeat")
 			default:
 			}
 			n, _, err := conn.ReadFromUDP(by)
