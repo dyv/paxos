@@ -1,81 +1,17 @@
+// db_client is a simple example client application for paxos. It is run by the
+// paxos leader node. Clients to this Database application connect with the
+// Paxos cluster directly. The paxos cluster then forwards operations to our
+// database after they have been committed. It is just like another client
+// application that is connected to the paxos cluster.
 package main
 
 import (
-	"bufio"
-	"encoding/json"
 	"flag"
-	"fmt"
-	"net"
-	"os"
-	"strings"
+	"log"
 
 	"github.com/dyv/distfs/paxos"
+	"github.com/dyv/distfs/paxos/db_client/db_backend"
 )
-
-type OpType int
-
-const (
-	GET OpType = iota
-	PUT
-)
-
-type Op struct {
-	T OpType
-	K string
-	V string
-}
-
-// an in memory Key Value Store: ie. a map
-type DB struct {
-	pax  *paxos.Client
-	Data map[string]string
-}
-
-func NewDB() *DB {
-	return &DB{paxos.NewClient(), make(map[string]string)}
-}
-
-func (db *DB) Put(op Op, rep bool) string {
-	if rep {
-		db.pax.NewRequest(op)
-	}
-	db.Data[op.K] = op.V
-	return op.V
-}
-
-func (db *DB) Get(op Op, rep bool) string {
-	if rep {
-		db.pax.NewRequest(op)
-	}
-	return db.Data[op.K]
-}
-
-// perform performs the op but discards the type
-func (db *DB) Perform(op Op, rep bool) string {
-	switch op.T {
-	case PUT:
-		return db.Put(op, rep)
-	case GET:
-		return db.Get(op, rep)
-	default:
-		fmt.Printf("INVALID OPERATION: %+v\n", op.T)
-	}
-	return ""
-}
-
-func handleConnection(conn net.Conn, db *DB) {
-	dec := json.NewDecoder(conn)
-	for {
-		var op Op
-		err := dec.Decode(&op)
-		if err != nil {
-			fmt.Println("Done handling connection: ", err, op)
-			break
-		}
-		db.Perform(op, false)
-	}
-	return
-}
 
 var paxos_port string
 var paxos_addr string
@@ -87,42 +23,28 @@ func init() {
 	)
 	flag.StringVar(&paxos_port, "paxos_port", "1234", "the port paxos is running on")
 	flag.StringVar(&paxos_addr, "paxos_addr", "127.0.0.1", "the address paxos is running on")
+	log.SetFlags(log.Lshortfile)
+}
+
+func handlePaxos(db *db_backend.DB) {
+	// Waiting for LOG Entries to apply
+	// Log entries come in order
+	for m := range db.App.Log {
+		// perform the received operation
+		res := db.Perform(m.Value.(*db_backend.Op), false)
+		// mark this entry as complete and send the result back to the paxos
+		// server
+		db.App.Commit(m.Entry, paxos.NewStrReq(res))
+	}
 }
 
 func main() {
 	// Connect With Paxos Agent
-	db := NewDB()
-	db.pax.AddServer(paxos_addr, paxos_port)
-	db.pax.ConnectAddr(paxos_addr, paxos_port)
-	old_vals, err := db.pax.GetLog()
-	if err != nil {
-		fmt.Println("Error Requesting Log from Server")
-		return
-	}
-	for v := range old_vals {
-		db.Perform(v.(Op), false)
-	}
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		t := scanner.Text()
-		args := strings.Fields(t)
-		if len(args) < 2 {
-			continue
-		}
-		switch args[0] {
-		case "GET":
-			fmt.Println(db.Get(Op{GET, args[1], ""}, true))
-		case "PUT":
-			if len(args) > 3 {
-				fmt.Println("Invalid Number of Arguments")
-				continue
-			}
-			fmt.Println(db.Get(Op{PUT, args[1], args[2]}, true))
-		default:
-			fmt.Println("Invalid Argument: %v", args[0])
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "reading standard input:", err)
-	}
+	flag.Parse()
+	log.Printf("RUNNING PAXOS APP: -paxos_addr=%s -paxos_port=%s\n", paxos_addr, paxos_port)
+	log.Println("Running Paxos Client Application: db_client")
+	db := db_backend.NewDB()
+	log.Println("Created New Database")
+	db.App.RunApplication(paxos_addr, paxos_port)
+	handlePaxos(db)
 }

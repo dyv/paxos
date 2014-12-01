@@ -26,8 +26,8 @@ func (p Peer) Send(m Msg, send bool) error {
 	if !send {
 		return nil
 	}
-	log.Print("Destination: ", p.addr, ":", p.port)
-	log.Print("Msg: ", m)
+	//log.Print("Destination: ", p.addr, ":", p.port)
+	//log.Print("Msg: ", m)
 	client, err := net.Dial("udp", p.addr+":"+p.port)
 	if err != nil {
 		log.Println("Error Dialing Peer:", err)

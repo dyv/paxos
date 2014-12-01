@@ -14,6 +14,8 @@ type PaxosInstance struct {
 	naccepted     int
 	accepted      chan bool
 	AcceptedValue Value
+	resultset     chan bool
+	Result        Value
 }
 
 func NewPaxosInstance() PaxosInstance {
@@ -22,6 +24,7 @@ func NewPaxosInstance() PaxosInstance {
 	pi.voted = make(map[Peer]bool)
 	pi.history = make([]RoundValue, 0)
 	pi.accepted = make(chan bool)
+	pi.resultset = make(chan bool)
 	pi.round = -1
 	return pi
 }

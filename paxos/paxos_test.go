@@ -17,31 +17,33 @@ func TestPaxosWithOneAgent(t *testing.T) {
 	defer a.Close()
 	a.Run()
 	c := NewClient()
-	addr, err := getAddress()
+	addr, err := GetAddress()
 	if err != nil {
 		t.Error("Error getting address:", err)
 		return
 	}
 	c.AddServer(addr, "36808")
-	err = c.Connect(c.Servers[0])
+	err = c.ConnectFirst()
 	if err != nil {
 		t.Error("Error Connecting With Server:", err)
 		return
 	}
-	resp, err := c.Request("Request 1")
+	resp_sr, err := c.Request(NewStrReq("Request 1"))
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
 	}
+	resp := resp_sr.(*StringRequest).String()
 	t.Log("Response:", resp)
 	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
-	resp, err = c.Request("Request 2")
+	resp_sr, err = c.Request(NewStrReq("Request 2"))
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
 	}
+	resp = resp_sr.(*StringRequest).String()
 	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
@@ -67,7 +69,7 @@ func TestPaxosWithThreeAgents(t *testing.T) {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	addr, err := getAddress()
+	addr, err := GetAddress()
 	if err != nil {
 		t.Error("Error Getting Address:", err)
 		return
@@ -110,25 +112,27 @@ func TestPaxosWithThreeAgents(t *testing.T) {
 	a3.Run()
 	c := NewClient()
 	c.AddServer(addr, "36809")
-	err = c.Connect(c.Servers[0])
+	err = c.ConnectFirst()
 	if err != nil {
 		t.Error("Error Connecting With Server:", err)
 		return
 	}
-	resp, err := c.Request("Request 1")
+	resp_sr, err := c.Request(NewStrReq("Request 1"))
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
 	}
+	resp := resp_sr.(*StringRequest).String()
 	t.Log("Response:", resp)
 	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
-	resp, err = c.Request("Request 2")
+	resp_sr, err = c.Request(NewStrReq("Request 2"))
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
 	}
+	resp = resp_sr.(*StringRequest).String()
 	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
@@ -152,7 +156,7 @@ func TestPaxosWithThreeAgentsAndAFailure(t *testing.T) {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	addr, err := getAddress()
+	addr, err := GetAddress()
 	if err != nil {
 		t.Error("Error Getting Address:", err)
 		return
@@ -195,25 +199,27 @@ func TestPaxosWithThreeAgentsAndAFailure(t *testing.T) {
 	a3.Close()
 	c := NewClient()
 	c.AddServer(addr, "36812")
-	err = c.Connect(c.Servers[0])
+	err = c.ConnectFirst()
 	if err != nil {
 		t.Error("Error Connecting With Server:", err)
 		return
 	}
-	resp, err := c.Request("Request 1")
+	resp_sr, err := c.Request(NewStrReq("Request 1"))
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
 	}
+	resp := resp_sr.(*StringRequest).String()
 	t.Log("Response:", resp)
 	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
-	resp, err = c.Request("Request 2")
+	resp_sr, err = c.Request(NewStrReq("Request 2"))
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
 	}
+	resp = resp_sr.(*StringRequest).String()
 	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
@@ -237,7 +243,7 @@ func TestPaxosRedirect(t *testing.T) {
 		t.Error("Error Creating Agent:", err)
 		return
 	}
-	addr, err := getAddress()
+	addr, err := GetAddress()
 	if err != nil {
 		t.Error("Error Getting Address:", err)
 		return
@@ -280,12 +286,15 @@ func TestPaxosRedirect(t *testing.T) {
 	c := NewClient()
 	c.AddServer(addr, "36915")
 	c.AddServer(addr, "36916")
-	err = c.Connect(c.Servers[0])
+	err = c.ConnectFirst()
 	if err != nil {
 		t.Error("Error Connecting With Server:", err)
 		return
 	}
-	resp, err := c.Request("Request 1")
+	resp_sr, err := c.Request(NewStrReq("Request 1"))
+	resp := resp_sr.(*StringRequest).String()
+	firstaddr := c.LeaderAddr
+	firstport := c.LeaderPort
 	if err != nil {
 		t.Error("Error Requesting from Paxos Node:", err)
 		return
@@ -294,12 +303,12 @@ func TestPaxosRedirect(t *testing.T) {
 	if resp != "Request 1" {
 		t.Error("Server Failed")
 	}
-	err = c.Connect(c.Servers[1])
+	err = c.ConnectNew()
 	if err != nil {
 		t.Error("Error Connecting With Server:", err)
 		return
 	}
-	if c.leaderAddr != c.Servers[0].addr || c.leaderPort != c.Servers[0].port {
+	if c.LeaderAddr != firstaddr || c.LeaderPort != firstport {
 		t.Error("Was not reconnected with leader")
 	}
 }

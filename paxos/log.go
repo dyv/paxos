@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // If we record all the messages we receive then we replicate state
@@ -116,30 +117,58 @@ func (l *MsgLog) Append(m Msg) {
 type ValueEntry struct {
 	Committed bool
 	Val       Value
+	Request   RequestInfo
 }
 
 // A ValueLog is a sequence of Values that the the Paxos node has accepted
 // in the order that it has accepted it
 type ValueLog struct {
+	cv *sync.Cond
+	sync.Mutex
 	Log []ValueEntry
 }
 
 func NewValueLog(sz int) *ValueLog {
 	l := &ValueLog{}
+	l.cv = sync.NewCond(l)
 	l.Log = make([]ValueEntry, 0, sz)
 	return l
 }
 
-func (l *ValueLog) InsertAt(i int, v Value) {
+func (l *ValueLog) InsertAt(i int, v Value, r RequestInfo) {
+	l.Lock()
 	if i >= len(l.Log) {
 		t := make([]ValueEntry, ((i+1)*3)/2)
 		copy(t, l.Log)
 		l.Log = t
 
 	}
-	l.Log[i] = ValueEntry{true, v}
+	l.Log[i] = ValueEntry{true, v, r}
+	l.Unlock()
+	l.cv.Broadcast()
 }
 
-func (l *ValueLog) Append(v Value) {
-	l.Log = append(l.Log, ValueEntry{true, v})
+func (l *ValueLog) Append(v Value, r RequestInfo) {
+	l.Lock()
+	l.Log = append(l.Log, ValueEntry{true, v, r})
+	l.Unlock()
+	l.cv.Broadcast()
+}
+
+func (l *ValueLog) Stream() <-chan ValueEntry {
+	ch := make(chan ValueEntry)
+	go func() {
+		i := 0
+		for {
+			// wait for this entry to be filled
+			l.Lock()
+			for i >= len(l.Log) || !l.Log[i].Committed {
+				l.cv.Wait()
+			}
+			ch <- l.Log[i]
+			i++
+			l.Unlock()
+		}
+	}()
+	return ch
 }

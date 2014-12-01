@@ -1,9 +1,4 @@
-Refactor so if I am leader I do not go through all Prepare and Promise steps,
-         instead only go through the Accept and Accepted steps
-         Make it so we only accept from our leader
-
-
-Failure after Promising: Need to Store to disk my promise.
+Lock all accesses to the Values Log
 
 Final Repository is located at "https://github.com/dyv/distfs"
 This is using Go for the primary language. Because it requires a very specific
