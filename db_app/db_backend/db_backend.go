@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/dyv/distfs/paxos"
+	"github.com/dyv/paxos"
 )
 
 type OpType int

@@ -5,8 +5,8 @@ import (
 	"os/exec"
 	"testing"
 
-	"github.com/dyv/distfs/paxos"
-	"github.com/dyv/distfs/paxos/db_app/db_backend"
+	"github.com/dyv/paxos"
+	"github.com/dyv/paxos/db_app/db_backend"
 )
 
 func TestPaxosApp(t *testing.T) {

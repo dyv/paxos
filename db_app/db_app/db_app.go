@@ -10,8 +10,8 @@ import (
 	"flag"
 	"log"
 
-	"github.com/dyv/distfs/paxos"
-	"github.com/dyv/distfs/paxos/db_app/db_backend"
+	"github.com/dyv/paxos"
+	"github.com/dyv/paxos/db_app/db_backend"
 )
 
 // variables for the paxos flag arguments
