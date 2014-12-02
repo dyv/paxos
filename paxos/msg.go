@@ -67,23 +67,23 @@ func (m MsgType) String() string {
 
 // request info is the stuff that stays constant throughout all the messages
 type RequestInfo struct {
-	Id    int   `json:"id"`
-	No    int   `json:"no"`
-	Val   Value `json:"val"`
-	Entry int   `json:"entry"`
-	NoSet bool  `json:"noset"` // flag to indicate that we should not set the value (we are only querying)
+	Id    int   `json:"id,omitempty"`
+	No    int   `json:"no,omitempty"`
+	Val   Value `json:"val,omitempty"`
+	Entry int   `json:"entry,omitempty"`
+	NoSet bool  `json:"noset,omitempty"` // flag to indicate that we should not set the value (we are only querying)
 }
 
 type Msg struct {
-	Type          MsgType     `json:"type"`
-	FromAddress   string      `json:"fromaddress"`
-	FromPort      string      `json:"fromport"`
-	LeaderAddress string      `json:"leaderAddress"`
-	LeaderPort    string      `json:"leaderPort"`
-	Request       RequestInfo `json:"request"`
-	Entry         int         `json:"entry"` // what entry in the log this is meant for
-	Round         int         `json:"round"`
-	Value         Value       `json:"value"`
-	RoundValue    RoundValue  `json:"roundvalue"` // For Previous Value (is this necessary)
-	Error         string      `json:"error"`
+	Type          MsgType     `json:"type,omitempty"`
+	FromAddress   string      `json:"fromaddress,omitempty"`
+	FromPort      string      `json:"fromport,omitempty"`
+	LeaderAddress string      `json:"leaderAddress,omitempty"`
+	LeaderPort    string      `json:"leaderPort,omitempty"`
+	Request       RequestInfo `json:"request,omitempty"`
+	Entry         int         `json:"entry,omitempty"` // what entry in the log this is meant for
+	Round         int         `json:"round,omitempty"`
+	Value         Value       `json:"value,omitempty"`
+	RoundValue    roundValue  `json:"roundvalue,omitempty"` // For Previous Value (is this necessary)
+	Error         string      `json:"error,omitempty"`
 }

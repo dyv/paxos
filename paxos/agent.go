@@ -12,98 +12,96 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"runtime"
 	"sync"
 	"time"
 )
 
+// initialize the random number generator and log format.
 func init() {
 	rand.Seed(time.Now().UnixNano())
 	log.SetFlags(log.Lshortfile)
+	runtime.GOMAXPROCS(runtime.NumCPU())
 }
 
-// RoundValue is a pair used by Agents to store the value that they have for a
-// given round.
-type RoundValue struct {
-	Round int   `json:"round"`
-	Val   Value `json:"value"`
+// RoundValue is a pair used by Agents to store the value that they have
+// accepted for a given round.
+type roundValue struct {
+	Round int   `json:"round,omitempty"`
+	Val   Value `json:"value,omitempty"`
 }
 
-// a client should have a sequence of requests that are dispersed
-// throughout the total number of requests. We need the client to give us a
-// request number so we know whether we are receiving a request that has
-// already been processed or one that hasn't. This means that we have to
-// have a means of telling, given a client's id, and a entry number,
-// whether this entry has been accepted (an index into values). If this entry
-// has been accepted, then we need only return the index into the values
-// that it corresponds with
-
+// ClientInfo stores information for a Paxos connection with a client.
 type ClientInfo struct {
-	id      int
-	reqno   int
-	request map[int]int // map the reqno to the Agent Values entry it is in
-	conn    net.Conn
+	id      int         // the unique identifier of a client
+	reqno   int         // the highest request number seen from this client
+	request map[int]int // map from the request number to the entry number (in the log)
+	conn    net.Conn    // the tcp connection to this client
 }
 
-var PaxosAddressFlag = "paxos_addr"
-var PaxosPortFlag = "paxos_port"
+// Paxos(.*)Flag are the flags that the paxos cluster expects the client
+// application to accept.
+// They will be filled with the address and port respectively that the
+// paxos leader is running at.
+var (
+	PaxosAddressFlag = "paxos_addr"
+	PaxosPortFlag    = "paxos_port"
+)
 
+// LeaderTimeout specifies the amount of time after which, if no heartbeat
+// message was recieved from the leader, the leader is invalidated.
 var LeaderTimeout time.Duration = 1 * time.Second
-var MaxLog int = 200000
 
 // Agent collapses the multiple roles in Paxos into a single role.
 // It plays the role of the Proposer, Acceptor, and Learner.
+// The agent is responsible for handling the entire Replicated Log, this way
+// it does not incur the overhead of an instance of paxos per log entry.
+// The leader is maintained between log entries.
 type Agent struct {
-	Peer
-	udpaddr    *net.UDPAddr
-	peers      []Peer // Deprecate
-	addrToPeer map[string]Peer
-	// Each of the following members are slices so that way we have history for
-	// each log entry we are trying to fill.
-	// votes is the number of votes we have recieved in this round
-	// for each given value
-	instances      []PaxosInstance
-	servingClients bool
-	servingAgents  bool
-	// leader election for efficiency and multi-paxos
-	leaderLock    *sync.Mutex
+	// Agent and client information
+	Peer                            // the peer (port + address) that represents this node
+	udpaddr        *net.UDPAddr     // the udpaddress this node is listening to
+	addrToPeer     map[string]Peer  // a map from peer address to Peer structure
+	instances      []*PaxosInstance // the paxos instances that correspond to log entries
+	instanceLock   *sync.Mutex
+	servingClients bool               // indicates if agent is serving clients
+	servingAgents  bool               // indicates if agent is serving other agents
+	clientLock     *sync.Mutex        // lock to restrict concurrent access to client info
+	clientId       int                // the next id to assign
+	clients        map[int]ClientInfo // map client id to client info
+	// leader information
+	leaderLock    *sync.Mutex      // restricts concurrent access to leaders
 	isLeader      bool             // is this current node the leader
-	leader        *Peer            // who is the current leader (for redirects)
-	leaderCurrent bool             // is the leader current (every T seconds check)
-	leaderTimeout <-chan time.Time // how long before the leader is invalidated
-	heartbeat     <-chan time.Time // how long before leader should send another message
-	done          chan bool
-	// Logging Functionality
-	// log for remembering whether we have committed something to an entry in
-	// the log, whether we have promised it, or whether we have prepared
-	// something for it, or whether
-	Messages   *MsgLog
-	Values     *ValueLog
-	entry      int
-	clientLock *sync.Mutex
-	clientId   int                // the next id to assign
-	clients    map[int]ClientInfo // map client id to client info
-	// App: The Client Application Command to Run when we become the leader
-	Cmd  *exec.Cmd
-	Apps []net.Conn
+	leader        *Peer            // who is the current leader
+	leaderCurrent bool             // is the leader current (check every LeaderTimeout)
+	leaderTimeout <-chan time.Time // channel to start check if leader is current
+	heartbeat     <-chan time.Time // channel to initiate leader heartbeart messages
+	done          chan bool        // channel to indicate that the agent should stop
+	// Logs
+	Messages *MsgLog   // the log of messages sent
+	Values   *ValueLog // the "replicated" log of values committed
+	entry    int       // the highest entry committed
+	// Application
+	cmdLock *sync.Mutex
+	Cmd     *exec.Cmd // the command that runs the client application
 }
 
+// ipv4Reg matches ipv4 addresses.
 var ipv4Reg = regexp.MustCompile(`\d+\.\d+\.\d+\.\d+`)
 
-var host = ""
+// host is the cached host address used in GetAddress.
+var host = "NONE"
 
 // getAddress gets the localhosts IPv4 address.
 func GetAddress() (string, error) {
 	name, err := os.Hostname()
-	log.Println("Getting Address:", name)
 	if err != nil {
 		log.Print("Error Resolving Hostname:", err)
 		return "", err
 	}
-	log.Print("name: ", name)
-	if host == "" {
+	if host == "NONE" {
 		as, err := net.LookupHost(name)
 		if err != nil {
-			log.Print("Error Looking Up Host:", err)
 			return "", err
 		}
 		addr := ""
@@ -115,7 +113,7 @@ func GetAddress() (string, error) {
 			}
 		}
 		if addr == "" {
-			err = errors.New("No IPv4 Address")
+			err = errors.New("No IPv4 Address for Hostname")
 		}
 		return addr, err
 	}
@@ -123,7 +121,8 @@ func GetAddress() (string, error) {
 }
 
 // NewAgent creates a new agent that is located at the given port on this
-// machine.
+// machine. try_recover specifies whether the agent should recover its state
+// from the saved message logs.
 func NewAgent(port string, try_recover bool) (*Agent, error) {
 	var err error
 	a := &Agent{}
@@ -142,11 +141,11 @@ func NewAgent(port string, try_recover bool) (*Agent, error) {
 		log.Print("Error resolving UDP address")
 		return nil, err
 	}
-	a.peers = make([]Peer, 0, 10)
 	a.addrToPeer = make(map[string]Peer)
 	// vote metadata
 	a.done = make(chan bool)
-	a.instances = make([]PaxosInstance, 0)
+	a.instances = make([]*PaxosInstance, 0)
+	a.instanceLock = &sync.Mutex{}
 	a.Connect(a.addr, a.port)
 	a.Messages, err = NewMsgLog(1000, path.Join("logs", net.JoinHostPort(a.addr, port)), a, try_recover)
 	if err != nil {
@@ -155,13 +154,21 @@ func NewAgent(port string, try_recover bool) (*Agent, error) {
 	}
 	a.Values = NewValueLog(1000)
 	a.clients = make(map[int]ClientInfo)
+	a.cmdLock = &sync.Mutex{}
 	return a, nil
 }
 
+// RegisterExecCmd registers the given command as the "application" command. It
+// runs this command when this agent becomes leader.
 func (a *Agent) RegisterExecCmd(cmd *exec.Cmd) {
 	a.Cmd = cmd
 }
 
+// RegisterCmd is a thin wrapper around RegisterExecCmd. In addition to
+// registering the command name with the given arguments it appends the flags
+// that indicate the address and port of the paxos node. It also redirects the
+// commands stdin, stdout, and stderr to point to the same location as the
+// agent.
 func (a *Agent) RegisterCmd(name string, args ...string) {
 	args = append(args, "-"+PaxosAddressFlag+"="+a.addr)
 	args = append(args, "-"+PaxosPortFlag+"="+a.port)
@@ -171,50 +178,68 @@ func (a *Agent) RegisterCmd(name string, args ...string) {
 	a.Cmd.Stderr = os.Stderr
 }
 
+// setupLeader starts the leader processes after this agent becomes leader. It
+// runs the client program and fills in missing paxos entries.
 func (a *Agent) setupLeader() {
 	log.Print("SETTING UP LEADER")
-	// first run the client Program
 	if a.Cmd != nil {
 		go func() {
 			log.Printf("Starting cmd: %+v\n", a.Cmd)
-			err := a.Cmd.Run()
+			a.cmdLock.Lock()
+			err := a.Cmd.Start()
+			a.cmdLock.Unlock()
 			if err != nil {
 				log.Printf("Error Running Command: %+v", err)
 			}
 		}()
 	}
-	// fill in the missing entries in the log
-	go func() {
-		a.Values.Lock()
-		for entry, v := range a.Values.Log {
-			// If I have not received this message then get this message
-			if !v.Committed {
-				a.Request(v.Val, RequestInfo{Entry: entry, NoSet: true})
-				//time.Sleep(10 * time.Millisecond)
-			}
+	/*a.Values.Lock()
+	for entry, v := range a.Values.Log {
+		// If I have not received this message then get this message
+		if !v.Committed {
+			a.Request(v.Val, RequestInfo{Entry: entry, NoSet: true})
+			//time.Sleep(10 * time.Millisecond)
 		}
-		a.Values.Unlock()
-	}()
+	}
+	fmt.Println("LOG COMMITTED")
+	fmt.Println(a.Values)
+	a.Values.Unlock()*/
+	fmt.Println("LEADER LOG:", a.Values)
 
 }
 
+// Close shuts down the agent. It stops serving agents and clients. It also
+// shuts down the client application if one is running.
 func (a *Agent) Close() {
-	log.Println("Closing")
 	if a.servingAgents {
+		log.Println("Closing Agent-to-Agent Connections")
 		a.done <- true
+		a.servingAgents = false
+		log.Println("Closed")
 	}
+	log.Println("closing clients")
 	if a.servingClients {
+		log.Println("Closing Client Connections")
 		a.done <- true
+		a.servingClients = false
+		log.Println("Closed")
 	}
+	log.Println("cmd shutdown")
+	a.cmdLock.Lock()
+	log.Println("unlocked cmd")
 	if a.Cmd != nil && a.Cmd.Process != nil {
 		err := a.Cmd.Process.Kill()
 		if err != nil {
-			log.Println("Error Killing Process")
+			log.Println("Error Killing Application Process")
 		}
 	}
+	log.Println("cmd done")
+	a.cmdLock.Unlock()
+	a.leaderLock.Lock()
 	a.isLeader = false
-	log.Println("Closed Agent")
-	//os.Exit(0)
+	log.Println("changed leader status")
+	a.leaderLock.Unlock()
+	log.Println("Shutdown Agent")
 }
 
 // newRound initializes a new round for this proposer. It clears the recorded
@@ -238,13 +263,11 @@ func (a *Agent) Connect(addr, port string) error {
 		return err
 	}
 	a.addrToPeer[udp.String()] = *p
-	a.peers = append(a.peers, *p)
-	log.Println("Added Peer:", a.peers)
 	return nil
 }
 
-// Run starts this Paxos node serving clients and agents alike. It runs the
-// node in the background
+// Run starts this Paxos node serving clients and agents. It runs in the
+// background.
 func (a *Agent) Run() error {
 	err := a.ServeClients()
 	if err != nil {
@@ -253,25 +276,29 @@ func (a *Agent) Run() error {
 	}
 	err = a.ServeAgents()
 	if err != nil {
-		log.Print("Failed to Serve Agents")
+		log.Print("Failed to Serve Agents:", err)
 		return err
 	}
 	log.Print("Server is Running at: ", net.JoinHostPort(a.addr, a.port))
 	return nil
 }
 
-func (a *Agent) StreamLogs(conn net.Conn) {
+// StreamLogs streams the "replicated" logs to the given connection, in order.
+func (a *Agent) StreamLogs(enc *json.Encoder) {
+	log.Println("Streaming Logs: ", a.Values)
 	// make a.Values iterable
-	enc := json.NewEncoder(conn)
 	stream := a.Values.Stream()
 	for entry := range stream {
-		log.Printf("Streaming Value: LogResponse: %#v\n", entry.Val)
+		log.Printf("Streaming Value: LogResponse: %+v\n", entry.Val)
 		m := Msg{Type: LogResponse, Request: entry.Request, Value: entry.Val}
-		log.Printf("Encoding: %+v\n", m)
+		log.Printf("Streaming Log Value: %+v\n", m)
 		enc.Encode(m)
 	}
 }
 
+// handleClientRequests handles client requests. It handles Client Apps, App
+// Responses, Connection Requests, and Client Requests. It loops until the
+// connection is closed.
 func (a *Agent) handleClientRequest(conn net.Conn) {
 	dec := json.NewDecoder(conn)
 	enc := json.NewEncoder(conn)
@@ -284,34 +311,42 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 			conn.Close()
 			return
 		}
+		log.Println("Decoded Client Request:", msg)
 		var resp Msg
 		switch msg.Type {
 		case ClientApp:
 			log.Println("Client Application Requesting To Join Paxos Cluster")
-			//a.Apps = append(a.Apps, conn)
-			go a.StreamLogs(conn)
+			go a.StreamLogs(enc)
 			// Start Streaming Here for this connection
 		case AppResponse:
 			log.Printf("Application Response Received: %#v, #%d\n", msg.Value, msg.Entry)
-			a.instances[msg.Entry].Result = msg.Value
-			a.instances[msg.Entry].resultset <- true
+			a.instanceLock.Lock()
+			instance := a.instances[msg.Entry]
+			a.instanceLock.Unlock()
+			instance.Lock()
+			if instance.waiting {
+				log.Println("Sending Response back to Waiting Client:", msg.Entry)
+				instance.Result = msg.Value
+				instance.Unlock()
+				instance.resultset <- true
+				continue
+			}
+			instance.Unlock()
 		case ClientConnectRequest:
 			log.Println("Received Connect Request")
 			// if there is a leader then redirect to that leader
 			a.leaderLock.Lock()
 			if !a.isLeader && a.leader != nil {
-				log.Println("Redirecting Client")
 				resp.Type = ClientRedirect
 				resp.LeaderAddress = a.leader.addr
 				resp.LeaderPort = a.leader.port
 				a.leaderLock.Unlock()
 				enc.Encode(resp)
-				log.Println("Closing Connection")
 				err := conn.Close()
 				if err != nil {
 					log.Println("ERROR: Paxos Closed Client Connection With Error: %v")
 				}
-				log.Println("Closed Connection")
+				log.Println("Redirected Client and Closed Connection")
 				return
 			} else {
 				log.Println("Accepted Client")
@@ -371,12 +406,14 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 			msg.Request.Entry = a.entry
 			a.entry++
 			err = a.Request(msg.Value, msg.Request)
+			log.Println("Returned From Request")
 			if err != nil {
+				log.Println("ERROR in Request:", err)
 				resp.Type = Error
 				resp.Error = err.Error()
 			} else {
 				vi := ci.request[cno]
-				log.Print("Generated Entry")
+				log.Println("Generated Entry")
 				resp.Type = ClientResponse
 				resp.Value = a.instances[vi].Result
 				break
@@ -387,6 +424,7 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 			resp.Error = err.Error()
 		}
 		resp.Request = msg.Request
+		log.Print("ENCODING RESPONSE handleClientRequest")
 		err = enc.Encode(resp)
 		if err != nil {
 			log.Print("Error Encoding Response")
@@ -403,6 +441,7 @@ func (a *Agent) ServeClients() error {
 		log.Println("Listen Error:", err)
 		return err
 	}
+	a.servingClients = true
 	// setup Conection Closer
 	go func(a *Agent, l net.Listener) {
 		<-a.done
@@ -421,6 +460,8 @@ func (a *Agent) ServeClients() error {
 	return nil
 }
 
+// SendHeartbeat sends a heartbeat message to this agent's peers if it is the
+// leader.
 func (a *Agent) SendHeartbeat() {
 	// if I am not a leader don't spam and send heartbeats
 	a.leaderLock.Lock()
@@ -429,12 +470,13 @@ func (a *Agent) SendHeartbeat() {
 		return
 	}
 	a.leaderLock.Unlock()
-	for _, p := range a.peers {
+	for _, p := range a.addrToPeer {
 		p.Send(Msg{Type: Heartbeat, FromAddress: a.addr, FromPort: a.port}, true)
 	}
 }
 
-func (a *Agent) handleMessage(m Msg, send bool) {
+// handlePaxosMessage handles messages received from other paxos nodes.
+func (a *Agent) handlePaxosMessage(m Msg, send bool) {
 	p, ok := a.addrToPeer[net.JoinHostPort(m.FromAddress, m.FromPort)]
 	if !ok {
 		log.Print("From Address is not on Peers List: Rejecting")
@@ -445,13 +487,11 @@ func (a *Agent) handleMessage(m Msg, send bool) {
 
 	switch m.Type {
 	case Heartbeat:
-		// if we have already determined that the leader is current
-		// for this round then dont do anything
+		// it the leader is current then don't do anything
 		if a.leaderCurrent {
 			return
 		}
-		// if the leader needs to be updated and this is the leader
-		// we think it should be then say that this leader is alive
+		// if the leader's currency is pending then reassert it is a leadership
 		if !a.leaderCurrent &&
 			a.leader != nil &&
 			a.leader.addr == p.addr &&
@@ -502,21 +542,24 @@ func (a *Agent) ServeAgents() error {
 				// if the leader has not been updated kill it
 				// otherwise say that the leader is not current
 				// and wait for the leader to verify that it is alive
+				a.leaderLock.Lock()
 				if !a.leaderCurrent {
 					a.leader = nil
 				}
 				a.leaderCurrent = false
-				//log.Println("Sending heartbeat")
+				a.leaderLock.Unlock()
 			default:
 			}
 			n, _, err := conn.ReadFromUDP(by)
 			if err != nil {
-				es := err.Error()
 				// if the error is a timeout just try again
-				if len(es) >= 8 && es[len(es)-8:] == "timeout" {
+				if err.(*net.OpError).Timeout() {
 					continue
 				}
-
+				if err != nil {
+					log.Println("Error Reading From Socket:", err)
+					return
+				}
 			}
 			if n == 0 {
 				continue
@@ -529,9 +572,9 @@ func (a *Agent) ServeAgents() error {
 				log.Println("Error Decoding:", err)
 				continue
 			}
-			log.Print("Received Message: ", m)
+			//log.Print("Received Message: ", m)
 			a.Messages.Append(m)
-			a.handleMessage(m, true)
+			a.handlePaxosMessage(m, true)
 		}
 	}(a, conn, by)
 	return nil
@@ -541,9 +584,10 @@ func (a *Agent) ServeAgents() error {
 // Quorum returns whether the number given signifies exactly one Quorum for
 // this Agent/Proposer.
 func (a *Agent) Quorum(n int) bool {
-	return n == len(a.peers)/2+1
+	return n == len(a.addrToPeer)/2+1
 }
 
+// RequestTimeout is returned if the client request timedout
 var RequestTimeout error = errors.New("paxos: request timed out")
 
 // Request is an RPC call that client applications can call. When a Paxos Agent
@@ -552,38 +596,61 @@ var RequestTimeout error = errors.New("paxos: request timed out")
 func (a *Agent) Request(value Value, r RequestInfo) error {
 	log.Printf("Requesting Entry: %v", r.Entry)
 	log.Printf("Request Info: %v", r)
+	a.instanceLock.Lock()
 	if r.Entry >= len(a.instances) {
 		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
 			a.instances = append(a.instances, NewPaxosInstance())
 		}
 	}
-	a.instances[r.Entry].myvalue = value
-
+	instance := a.instances[r.Entry]
+	a.instanceLock.Unlock()
+	instance.Lock()
+	instance.myvalue = value
+	next_round := instance.round
+	instance.Unlock()
 	if !a.isLeader {
-		a.StartRequest(a.instances[r.Entry].round+1, value, r, true)
+		a.StartRequest(next_round, value, r, true)
 	} else {
-		a.Promise(-1, RoundValue{}, r, Peer{a.addr, a.port, nil}, true, true)
+		a.Promise(-1, roundValue{}, r, Peer{a.addr, a.port, nil}, true, true)
 	}
 	// wait for this proposal to be accepted (assigned a log entry) or a timeout to occur
 	timeout := make(chan bool)
 	go func() {
-		time.Sleep(1 * time.Second)
+		time.Sleep(5 * time.Second)
 		timeout <- true
 	}()
 	log.Print("WAITING ON: ", a.instances[r.Entry].accepted)
+	a.instanceLock.Lock()
+	accepted := a.instances[r.Entry].accepted
+	a.instanceLock.Unlock()
 	select {
-	case <-a.instances[r.Entry].accepted:
-		log.Print("ENTRY WAS ACCEPTED: ", a.instances[r.Entry])
+	case <-accepted:
+		a.instanceLock.Lock()
+		instance := a.instances[r.Entry]
+		instance.Lock()
+		log.Print("ENTRY WAS ACCEPTED: ", instance)
+		instance.Unlock()
+		a.instanceLock.Unlock()
 	case <-timeout:
 		return RequestTimeout
 	}
 	// now we have assigned a specific log entry to this request, we send it
 	// out to the client applications that are running. After one of them has
 	if a.Cmd != nil {
-		log.Println("WAITING FOR RESULT SET:", r.Entry, a.instances[r.Entry].resultset)
-		<-a.instances[r.Entry].resultset
+		a.instanceLock.Lock()
+		a.instances[r.Entry].waiting = true
+		resultset := a.instances[r.Entry].resultset
+		a.instanceLock.Unlock()
+		<-resultset
+		a.instanceLock.Lock()
+		instance := a.instances[r.Entry]
+		a.instanceLock.Unlock()
+		instance.Lock()
+		instance.waiting = false
+		instance.Unlock()
 		log.Println("REQUEST COMPLETE: Result set")
 	} else {
+		// when no cmd is assigned send back the accepted value as confirmation
 		log.Println("NO CMD assigned to Node")
 		a.instances[r.Entry].Result = a.instances[r.Entry].AcceptedValue
 	}
@@ -595,7 +662,7 @@ func (a *Agent) StartRequest(round int, value Value, r RequestInfo, send bool) {
 	a.newRound(r.Entry)
 	a.instances[r.Entry].myvalue = value
 	log.Print("Starting Client Request: Sending Prepare Message with Round: ", round)
-	for _, p := range a.peers {
+	for _, p := range a.addrToPeer {
 		p.Send(Msg{Type: Prepare,
 			FromAddress: a.addr, FromPort: a.port,
 			Request: r,
@@ -603,12 +670,12 @@ func (a *Agent) StartRequest(round int, value Value, r RequestInfo, send bool) {
 	}
 }
 
-var NoValue RoundValue = RoundValue{-1, ""}
+var NoValue roundValue = roundValue{-1, ""}
 
 // LastAccepted is a function that returns the last RoundValue that has been
 // accepted by this agent and commited to its history. If no value was
 // previously committed to this agent's history it returns a NoValue.
-func (a *Agent) LastAccepted(entry int) RoundValue {
+func (a *Agent) LastAccepted(entry int) roundValue {
 	l := len(a.instances[entry].history)
 	if l == 0 {
 		return NoValue
@@ -623,12 +690,16 @@ func (a *Agent) LastAccepted(entry int) RoundValue {
 // response to the Proposer signifying that this slot has already been taken.
 func (a *Agent) Prepare(n int, r RequestInfo, p Peer, send bool) {
 	//log.Print("PREPARE: ", n, r, p, send)
+	a.instanceLock.Lock()
 	if r.Entry >= len(a.instances) {
 		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
 			a.instances = append(a.instances, NewPaxosInstance())
 		}
 	}
-	instance := &a.instances[r.Entry]
+	instance := a.instances[r.Entry]
+	a.instanceLock.Unlock()
+	instance.Lock()
+	defer instance.Unlock()
 	if n > instance.round || (n == instance.round && instance.promisedRound == false) {
 		if r.NoSet {
 			log.Print("Not Allowed to Accept")
@@ -659,16 +730,18 @@ func (a *Agent) Prepare(n int, r RequestInfo, p Peer, send bool) {
 }
 
 // The Proposer receives several promises for this round
-func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool, shortcut bool) {
+func (a *Agent) Promise(n int, la roundValue, r RequestInfo, p Peer, send bool, shortcut bool) {
+	a.instanceLock.Lock()
 	if r.Entry >= len(a.instances) {
 		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
 			a.instances = append(a.instances, NewPaxosInstance())
 		}
 	}
 
-	instance := &a.instances[r.Entry]
+	instance := a.instances[r.Entry]
+	a.instanceLock.Unlock()
 	if !shortcut {
-		log.Print("PROMISE: ", r.Entry, n, la, r, p, send)
+		//log.Print("PROMISE: ", r.Entry, n, la, r, p, send)
 		// only accept promises for the round we are currently on
 		if n != instance.round {
 			log.Printf("r != instance.round: %v != %v", r, instance.round)
@@ -676,8 +749,8 @@ func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool, 
 		}
 		instance.round = n
 		if la.Round < 0 {
-			log.Print("My Value: ", instance.myvalue)
-			log.Printf("r.Val: %+v", r.Val)
+			//log.Print("My Value: ", instance.myvalue)
+			//log.Printf("r.Val: %+v", r.Val)
 			instance.votes[r.Val]++
 			instance.voted[p] = true
 		} else {
@@ -710,8 +783,7 @@ func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool, 
 				nv = v
 			}
 		}
-		for _, p := range a.peers {
-			log.Print("Sending Accept Request Message: ", mv)
+		for _, p := range a.addrToPeer {
 			p.Send(Msg{Type: AcceptRequest,
 				FromAddress: a.addr, FromPort: a.port,
 				Request: r,
@@ -719,15 +791,16 @@ func (a *Agent) Promise(n int, la RoundValue, r RequestInfo, p Peer, send bool, 
 		}
 		return
 	}
-	log.Print("Not at Quorum: ", instance.voted)
 }
 
-func (a *Agent) Nack(n int, rv RoundValue, r RequestInfo, p Peer, send bool) {
+func (a *Agent) Nack(n int, rv roundValue, r RequestInfo, p Peer, send bool) {
 	//log.Print("NACK: ", n, rv, r, p, send)
 	a.leaderLock.Lock()
 	a.isLeader = false
 	a.leaderLock.Unlock()
-	instance := &a.instances[r.Entry]
+	a.instanceLock.Lock()
+	instance := a.instances[r.Entry]
+	a.instanceLock.Unlock()
 	// if we have recieved a nack for a greater round than this
 	if rv.Round > instance.round {
 		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
@@ -737,7 +810,7 @@ func (a *Agent) Nack(n int, rv RoundValue, r RequestInfo, p Peer, send bool) {
 		return
 	}
 	a.newRound(r.Entry)
-	for _, p := range a.peers {
+	for _, p := range a.addrToPeer {
 		p.Send(Msg{Type: Prepare,
 			FromAddress: a.addr, FromPort: a.port,
 			Request: r,
@@ -746,13 +819,16 @@ func (a *Agent) Nack(n int, rv RoundValue, r RequestInfo, p Peer, send bool) {
 }
 
 func (a *Agent) AcceptRequest(n int, v Value, r RequestInfo, p Peer, send bool) {
-	//log.Print("ACCEPTREQUEST: ", n, v, r, p, send)
+	log.Print("ACCEPTREQUEST: ", n, v, r, p, send)
+	log.Print("ENTRY:", r.Entry)
+	a.instanceLock.Lock()
 	if r.Entry >= len(a.instances) {
 		for i := len(a.instances); i < ((r.Entry+1)*3)/2; i++ {
 			a.instances = append(a.instances, NewPaxosInstance())
 		}
 	}
-	instance := &a.instances[r.Entry]
+	instance := a.instances[r.Entry]
+	a.instanceLock.Unlock()
 	if n != instance.round {
 		log.Print("Not for the right round")
 		return
@@ -763,7 +839,13 @@ func (a *Agent) AcceptRequest(n int, v Value, r RequestInfo, p Peer, send bool) 
 	}
 	instance.acceptedRound = true
 	instance.AcceptedValue = v
-	instance.history = append(instance.history, RoundValue{n, v})
+	instance.history = append(instance.history, roundValue{n, v})
+	if a.entry < r.Entry+1 {
+		a.entry = r.Entry + 1
+	}
+	if p.addr != a.addr || p.port != a.port {
+		a.Values.InsertAt(r.Entry, v, r)
+	}
 	// if we are not responding to our own request
 	p.Send(Msg{Type: Accepted,
 		FromAddress: a.addr, FromPort: a.port,
@@ -772,17 +854,21 @@ func (a *Agent) AcceptRequest(n int, v Value, r RequestInfo, p Peer, send bool) 
 }
 
 func (a *Agent) Accepted(n int, v Value, r RequestInfo, p Peer, send bool) {
-	//log.Printf("ACCEPTED: %+v", r)
-	instance := &a.instances[r.Entry]
+	log.Printf("ACCEPTED: %+v", r)
+	a.instanceLock.Lock()
+	instance := a.instances[r.Entry]
+	a.instanceLock.Unlock()
 	if n != instance.round {
 		return
 	}
+	instance.Lock()
+	defer instance.Unlock()
 	instance.naccepted++
 	if a.Quorum(instance.naccepted) {
 		instance.AcceptedValue = v
-		instance.history = append(instance.history, RoundValue{n, v})
+		instance.history = append(instance.history, roundValue{n, v})
 		log.Print("APPENDED to History: ", v)
-		log.Printf("Adding to Values: %+v %+v", r.Entry, v)
+		log.Printf("Adding to Values: %+v %+v", r, v)
 		log.Printf("Values prior: %+v", a.Values)
 		a.Values.InsertAt(r.Entry, v, r)
 		log.Printf("Values After: %+v", a.Values)

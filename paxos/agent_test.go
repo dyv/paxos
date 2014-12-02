@@ -29,7 +29,7 @@ func TestConnect(t *testing.T) {
 		t.Error("Failed to Connect with Peer:", err)
 	}
 	found := false
-	for _, p := range a.peers {
+	for _, p := range a.addrToPeer {
 		if p.addr == "127.0.0.1" && p.port == "36805" {
 			found = true
 			if p.client == nil {

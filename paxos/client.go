@@ -66,8 +66,8 @@ func (c *Client) Connect(s Server) error {
 		}
 		time.Sleep(tried)
 		tried *= multTimeout
-		if tried > endTimeout {
-			tried = endTimeout
+		if tried > maxTimeout {
+			tried = maxTimeout
 		}
 	}
 	if err != nil {
@@ -177,7 +177,7 @@ request:
 		goto request
 	}
 	if resp.Error != "" {
-		log.Print("Return Type Error")
+		log.Print("Return Type Error:", resp.Error)
 		return nil, errors.New(resp.Error)
 	}
 	log.Print("Client Received Response: ", resp)

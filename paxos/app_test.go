@@ -1,8 +1,7 @@
 package paxos_test
 
 import (
-	"io/ioutil"
-	"log"
+	"fmt"
 	"os/exec"
 	"testing"
 
@@ -11,7 +10,7 @@ import (
 )
 
 func TestPaxosApp(t *testing.T) {
-	log.SetOutput(ioutil.Discard)
+	//log.SetOutput(ioutil.Discard)
 	// First build db_client
 	exec.Command("go", "install", "./db_app/db_app").Run()
 	t.Log("Testing Paxos with Three Agent")
@@ -126,8 +125,11 @@ func TestPaxosApp(t *testing.T) {
 		t.Error("Server Failed: Put: resp != value2")
 		return
 	}
+	fmt.Println("CLOSING AGENT")
 	a1.Close()
+	fmt.Println("CONNECTING TO NEW AGENT")
 	err = c.ConnectNew()
+	fmt.Println("CONNECTED TO NEW AGENT")
 	if err != nil {
 		t.Error("Failed to Connect with New Paxos Node")
 		return
@@ -139,7 +141,7 @@ func TestPaxosApp(t *testing.T) {
 	}
 	resp = resp_sr.(*paxos.StringRequest).String()
 	t.Log("Response:", resp)
-	if resp != "value1" {
+	if resp != "value2" {
 		t.Error("Server Failed: Put: resp != value1")
 		return
 	}

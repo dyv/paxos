@@ -11,6 +11,7 @@ import (
 
 // If we record all the messages we receive then we replicate state
 type MsgLog struct {
+	mtx   *sync.Mutex
 	Log   []Msg
 	Fpath string
 	fd    *os.File
@@ -20,6 +21,7 @@ type MsgLog struct {
 // from that file
 func NewMsgLog(sz int, path string, a *Agent, try_recover bool) (*MsgLog, error) {
 	l := &MsgLog{}
+	l.mtx = &sync.Mutex{}
 	l.Log = make([]Msg, sz)
 	l.Fpath = path
 	dir := filepath.Dir(path)
@@ -78,7 +80,7 @@ func (l *MsgLog) Recover(a *Agent, f *os.File) error {
 		if m.Type == ClientRequest {
 			a.StartRequest(m.Round, m.Value, m.Request, false)
 		} else {
-			a.handleMessage(m, false)
+			a.handlePaxosMessage(m, false)
 		}
 	}
 	// after recovering never assume that I am the leader
@@ -101,6 +103,7 @@ func (l *MsgLog) Flush() {
 }
 
 func (l *MsgLog) Append(m Msg) {
+	l.mtx.Lock()
 	l.Log = append(l.Log, m)
 	// Append this one message to the file
 	by, err := json.Marshal(m)
@@ -112,6 +115,7 @@ func (l *MsgLog) Append(m Msg) {
 		log.Fatal("Error Appending To Log:", err)
 	}
 	l.Flush()
+	l.mtx.Unlock()
 }
 
 type ValueEntry struct {
@@ -163,8 +167,10 @@ func (l *ValueLog) Stream() <-chan ValueEntry {
 			// wait for this entry to be filled
 			l.Lock()
 			for i >= len(l.Log) || !l.Log[i].Committed {
+				log.Println("Stream: Waiting for entry:", i)
 				l.cv.Wait()
 			}
+			log.Println("Stream: Streaming Entry:", i)
 			ch <- l.Log[i]
 			i++
 			l.Unlock()

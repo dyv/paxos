@@ -2,7 +2,6 @@ package paxos
 
 // the client essentially tries to replicate the log locally
 import (
-	"container/heap"
 	"encoding/json"
 	"io"
 	"log"
@@ -63,7 +62,6 @@ type App struct {
 	dec  *json.Decoder
 	msgs chan Msg
 	cv   *sync.Cond
-	mq   *MsgQueue
 	Log  chan AppLogEntry
 	// requests ensures that for each request with reqno we first process the
 	// log, then tell the request that it has completed
@@ -87,9 +85,6 @@ func NewApp() *App {
 	c.requestsLock = &sync.Mutex{}
 	c.cv = sync.NewCond(&sync.Mutex{})
 	c.requests = make(map[int]*RequestResponse)
-	q := make(MsgQueue, 0, 100)
-	c.mq = &q
-	heap.Init(c.mq)
 	c.example_value = NewStrReq("")
 	return c
 }
@@ -113,8 +108,8 @@ func (c *App) Connect(s Server) error {
 		log.Print("Unable To Connect")
 		time.Sleep(tried)
 		tried *= multTimeout
-		if tried > endTimeout {
-			tried = endTimeout
+		if tried > maxTimeout {
+			tried = maxTimeout
 		}
 	}
 	if err != nil {
@@ -122,6 +117,7 @@ func (c *App) Connect(s Server) error {
 	}
 	c.dec = json.NewDecoder(c.s)
 	c.enc = json.NewEncoder(c.s)
+	//c.enc.Encode(Msg{Type: ClientApp})
 	c.enc.Encode(Msg{Type: ClientConnectRequest})
 	var resp Msg
 	err = c.dec.Decode(&resp)
@@ -149,7 +145,6 @@ func (c *App) ConnectAddr(addr, port string) error {
 func (c *App) RunApplication(server, port string) {
 	log.Print("Connecting With Application")
 	c.ConnectAddr(server, port)
-	c.enc = json.NewEncoder(c.s)
 	// ClientApp message starts the Log Streaming
 	err := c.enc.Encode(Msg{Type: ClientApp})
 	if err != nil {

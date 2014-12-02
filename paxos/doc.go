@@ -14,7 +14,8 @@
 //
 // Optimizations that are used are Nack responses (rather than no
 // response), leader election, bypassing Propose/Promise steps if a leader is
-// up to date, "Master Leases" (Paxos Made Live).
+// up to date, "Master Leases" (Paxos Made Live), clients redirected to leader
+// (if present), clients connect using exponential backoff algorithm.
 //
 // Noticibly Absent: Dependency on Absolute Time agreement across nodes
 //
