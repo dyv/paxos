@@ -193,6 +193,7 @@ func (a *Agent) setupLeader() {
 			}
 		}()
 	}
+	// Rework catchup mechnism (what is the upperbound for catching up?)
 	/*a.Values.Lock()
 	for entry, v := range a.Values.Log {
 		// If I have not received this message then get this message
@@ -670,7 +671,9 @@ func (a *Agent) StartRequest(round int, value Value, r RequestInfo, send bool) {
 	}
 }
 
-var NoValue roundValue = roundValue{-1, ""}
+// noValue is the value a roundValue takes if there is no corresponding value
+// assigned
+var noValue roundValue = roundValue{-1, ""}
 
 // LastAccepted is a function that returns the last RoundValue that has been
 // accepted by this agent and commited to its history. If no value was
@@ -678,7 +681,7 @@ var NoValue roundValue = roundValue{-1, ""}
 func (a *Agent) LastAccepted(entry int) roundValue {
 	l := len(a.instances[entry].history)
 	if l == 0 {
-		return NoValue
+		return noValue
 	}
 	return a.instances[entry].history[l-1]
 }
@@ -729,7 +732,9 @@ func (a *Agent) Prepare(n int, r RequestInfo, p Peer, send bool) {
 	}
 }
 
-// The Proposer receives several promises for this round
+// Keep track of the number of promises received for each round.
+// If this agent reach a quorum of promises for this round it becomes the
+// leader and sends out accept messages.
 func (a *Agent) Promise(n int, la roundValue, r RequestInfo, p Peer, send bool, shortcut bool) {
 	a.instanceLock.Lock()
 	if r.Entry >= len(a.instances) {
@@ -793,6 +798,8 @@ func (a *Agent) Promise(n int, la roundValue, r RequestInfo, p Peer, send bool, 
 	}
 }
 
+// If an agent receives a nack response for a round greater than this then stop
+// trying to assign this value and accept the other one.
 func (a *Agent) Nack(n int, rv roundValue, r RequestInfo, p Peer, send bool) {
 	//log.Print("NACK: ", n, rv, r, p, send)
 	a.leaderLock.Lock()
@@ -818,6 +825,8 @@ func (a *Agent) Nack(n int, rv roundValue, r RequestInfo, p Peer, send bool) {
 	}
 }
 
+// If an agent receives an AcceptRequest and who it sends from is the leader,
+// then the agent accepts this value.
 func (a *Agent) AcceptRequest(n int, v Value, r RequestInfo, p Peer, send bool) {
 	log.Print("ACCEPTREQUEST: ", n, v, r, p, send)
 	log.Print("ENTRY:", r.Entry)
@@ -853,6 +862,7 @@ func (a *Agent) AcceptRequest(n int, v Value, r RequestInfo, p Peer, send bool) 
 		Round:   n, Value: v}, send)
 }
 
+// If a majority of nodes Accepted this response then this response is done.
 func (a *Agent) Accepted(n int, v Value, r RequestInfo, p Peer, send bool) {
 	log.Printf("ACCEPTED: %+v", r)
 	a.instanceLock.Lock()
