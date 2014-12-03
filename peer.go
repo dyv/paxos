@@ -7,12 +7,15 @@ import (
 	"net"
 )
 
+// Peer represents a connection.
 type Peer struct {
 	addr   string
 	port   string
 	client net.Conn
 }
 
+// NewPeer establishes a new peer connection with the address and port
+// supplied.
 func NewPeer(address, port string) (*Peer, error) {
 	client, err := net.Dial("udp", address+":"+port)
 	if err != nil {
@@ -22,6 +25,7 @@ func NewPeer(address, port string) (*Peer, error) {
 	return &Peer{address, port, client}, nil
 }
 
+// Send sends a message to this peer (depending if send is true).
 func (p Peer) Send(m Msg, send bool) error {
 	if !send {
 		return nil

@@ -9,16 +9,18 @@ import (
 	"sync"
 )
 
-// If we record all the messages we receive then we replicate state
+// The message log records the messages that this paxos agent has recieved so
+// that it can recover its state in case of failure.
 type MsgLog struct {
 	mtx   *sync.Mutex
 	Log   []Msg
 	Fpath string
-	fd    *os.File
+	fd    *os.File // the file that back the message log
 }
 
-// returns whether this file existed before: if it did then recover the log
-// from that file
+// Create a new message log of given size, that corresponds to file at path. It
+// is associated with an agent in case it needs to recover it from a previously
+// saved state.
 func NewMsgLog(sz int, path string, a *Agent, try_recover bool) (*MsgLog, error) {
 	l := &MsgLog{}
 	l.mtx = &sync.Mutex{}
@@ -65,6 +67,7 @@ func NewMsgLog(sz int, path string, a *Agent, try_recover bool) (*MsgLog, error)
 	return l, nil
 }
 
+// Recover recovers the agent from the saved MsgLog.
 func (l *MsgLog) Recover(a *Agent, f *os.File) error {
 	dec := json.NewDecoder(f)
 	for {
@@ -89,12 +92,14 @@ func (l *MsgLog) Recover(a *Agent, f *os.File) error {
 	return nil
 }
 
+// Resize resizes the in-memory message log
 func (l *MsgLog) Resize(n int) {
 	tl := make([]Msg, n*2)
 	copy(tl, l.Log)
 	l.Log = tl
 }
 
+// Flush flushes the message log to disk.
 func (l *MsgLog) Flush() {
 	err := l.fd.Sync()
 	if err != nil {
@@ -102,6 +107,7 @@ func (l *MsgLog) Flush() {
 	}
 }
 
+// Append appends a new message to the message log and flushes it to disk.
 func (l *MsgLog) Append(m Msg) {
 	l.mtx.Lock()
 	l.Log = append(l.Log, m)
@@ -118,20 +124,22 @@ func (l *MsgLog) Append(m Msg) {
 	l.mtx.Unlock()
 }
 
+// ValueEntry is an entry into the ValuesLog
 type ValueEntry struct {
-	Committed bool
-	Val       Value
-	Request   RequestInfo
+	Committed bool        // Indicates whether this entry is committed
+	Val       Value       // The value that has been committed here
+	Request   RequestInfo // The request associated with this value
 }
 
 // A ValueLog is a sequence of Values that the the Paxos node has accepted
-// in the order that it has accepted it
+// in the order that it has accepted it.
 type ValueLog struct {
 	cv *sync.Cond
 	sync.Mutex
 	Log []ValueEntry
 }
 
+// NewValueLog creates and initializes log.
 func NewValueLog(sz int) *ValueLog {
 	l := &ValueLog{}
 	l.cv = sync.NewCond(l)
@@ -139,6 +147,9 @@ func NewValueLog(sz int) *ValueLog {
 	return l
 }
 
+// InsertAt inserts a value with given request info at a given index in the
+// log. There is no need to commit this to disk because it can be recovered
+// from the message log.
 func (l *ValueLog) InsertAt(i int, v Value, r RequestInfo) {
 	l.Lock()
 	if i >= len(l.Log) {
@@ -149,9 +160,10 @@ func (l *ValueLog) InsertAt(i int, v Value, r RequestInfo) {
 	}
 	l.Log[i] = ValueEntry{true, v, r}
 	l.Unlock()
-	l.cv.Broadcast()
+	l.cv.Broadcast() // Signal those that might be streaming the log that a new entry is availible.
 }
 
+// Append a value to the log.
 func (l *ValueLog) Append(v Value, r RequestInfo) {
 	l.Lock()
 	l.Log = append(l.Log, ValueEntry{true, v, r})
@@ -159,6 +171,7 @@ func (l *ValueLog) Append(v Value, r RequestInfo) {
 	l.cv.Broadcast()
 }
 
+// Stream returns a channel of values that corresponds with this log in order.
 func (l *ValueLog) Stream() <-chan ValueEntry {
 	ch := make(chan ValueEntry)
 	go func() {

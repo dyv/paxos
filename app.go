@@ -20,11 +20,14 @@ type RequestResponse struct {
 	E    error
 }
 
+// EncoderDecoder is the interface that ensures that all values given to the
+// paxos cluster can be encoded as a string for internal representation.
 type EncoderDecoder interface {
 	Encode() ([]byte, error)
 	Decode([]byte) error
 }
 
+// StringRequest is a basic value that satisfies the EncoderDecoder interface.
 type StringRequest struct {
 	s *string
 }
@@ -49,6 +52,7 @@ func (s *StringRequest) String() string {
 	return *s.s
 }
 
+// AppLogEntry is an entry that the application log processes.
 type AppLogEntry struct {
 	Value interface{}
 	Entry int
@@ -62,21 +66,22 @@ type App struct {
 	dec  *json.Decoder
 	msgs chan Msg
 	cv   *sync.Cond
-	Log  chan AppLogEntry
-	// requests ensures that for each request with reqno we first process the
-	// log, then tell the request that it has completed
+	// Log is the stream of log entries that are fed into the application
+	Log          chan AppLogEntry
 	requestsLock *sync.Mutex
 	requests     map[int]*RequestResponse
-	// servers are the paxos servers we are trying to connect with
+	// Leader is the leader node of the paxos server that we are connected to
 	Leader Server
 	// Retries is how many times we are willing to retry connection
 	Retries int
-	//
-	id            int
-	reqno         int
+	id      int
+	reqno   int
+	// example_value is an example of the EncoderDecoder that is processed by
+	// the client application.
 	example_value EncoderDecoder
 }
 
+// NewApp creates a new applciation.
 func NewApp() *App {
 	c := new(App)
 	c.Retries = 1
@@ -89,10 +94,13 @@ func NewApp() *App {
 	return c
 }
 
+// RegisterExampleValue registers an example value for the application's
+// reference.
 func (c *App) RegisterExampleValue(ex EncoderDecoder) {
 	c.example_value = ex
 }
 
+// Connect connects the application with the supplied server.
 func (c *App) Connect(s Server) error {
 	c.Leader = s
 	var err error
@@ -117,7 +125,7 @@ func (c *App) Connect(s Server) error {
 	}
 	c.dec = json.NewDecoder(c.s)
 	c.enc = json.NewEncoder(c.s)
-	//c.enc.Encode(Msg{Type: ClientApp})
+	// request to connect as a client
 	c.enc.Encode(Msg{Type: ClientConnectRequest})
 	var resp Msg
 	err = c.dec.Decode(&resp)
@@ -138,10 +146,13 @@ func (c *App) Connect(s Server) error {
 	return err
 }
 
+// ConnectAddr connects the application to the specified address.
 func (c *App) ConnectAddr(addr, port string) error {
 	return c.Connect(Server{addr, port})
 }
 
+// RunApplication starts up the application by connecting with the given paxos
+// server and requesting to join as a client application.
 func (c *App) RunApplication(server, port string) {
 	log.Print("Connecting With Application")
 	c.ConnectAddr(server, port)
@@ -152,8 +163,7 @@ func (c *App) RunApplication(server, port string) {
 	}
 }
 
-// Invariant: Log entries always come in order from the Paxos Cluster starting
-// with 0
+// handleResponses handles responses sent from the paxos server.
 func (c *App) handleResponses() {
 	for {
 		var resp Msg
@@ -170,6 +180,8 @@ func (c *App) handleResponses() {
 		log.Printf("Decoded Message: %+v\n", resp)
 		switch resp.Type {
 		case LogResponse:
+			// LogResponses come strictly in order. Therefore we have to
+			// process them in order.
 			c.requests[resp.Request.Entry] = &RequestResponse{make(chan bool), nil, nil}
 
 			// decode the transmitted value and store that instead
@@ -209,8 +221,8 @@ func (c *App) handleResponses() {
 	}
 }
 
-// only once a log has been committed (for a given entry) will the request
-// allowed to proceed
+// Commit the given value as the result from the entry'th log entry. This
+// allows us to process the next log entry.
 func (c *App) Commit(entry int, res EncoderDecoder) {
 	c.requests[entry].V = res
 	c.requests[entry].done <- true
