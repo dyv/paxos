@@ -3,6 +3,7 @@ package paxos
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"time"
@@ -70,7 +71,7 @@ func (c *Client) Connect(s Server) error {
 			tried = maxTimeout
 		}
 	}
-	if err != nil {
+	if c.s == nil || err != nil {
 		log.Println("Err != nil: Connecting To New")
 		return c.ConnectNew()
 	}
@@ -125,11 +126,15 @@ func (c *Client) ConnectNew() error {
 	}
 	if c.s == nil {
 		log.Println("c.s == nil")
+		fmt.Println("c.s == nil: connecting to first")
 		return c.ConnectFirst()
 	}
+	fmt.Println(c.server, c.Servers)
+	fmt.Println(c.ServersSlice)
 	index := c.Servers[c.server]
 	s := c.ServersSlice[(index+1)%len(c.ServersSlice)]
 	err := c.Connect(s)
+	fmt.Println("Connected To New")
 	log.Println("Connect New:", err)
 	return err
 }
@@ -161,12 +166,20 @@ request:
 	err = c.enc.Encode(m)
 	if err != nil {
 		log.Print("Error encoding client request:", err)
+		err = c.ConnectNew()
+		if err == nil {
+			goto request
+		}
 		return nil, err
 	}
 	var resp Msg
 	err = c.dec.Decode(&resp)
 	if err != nil {
 		log.Print("Error Decoding Server Response:", err)
+		err = c.ConnectNew()
+		if err == nil {
+			goto request
+		}
 		return nil, err
 	}
 	if resp.Type == ClientRedirect {
@@ -180,10 +193,15 @@ request:
 		log.Print("Return Type Error:", resp.Error)
 		return nil, errors.New(resp.Error)
 	}
-	log.Print("Client Received Response: ", resp)
+	log.Printf("Client Received Response: %#v, VALUE==%#v\n", resp, resp.Value)
 	nv := c.example_value
 	nv.Decode([]byte(resp.Value))
 	return nv, err
+}
+
+func (c *Client) Kill() error {
+	var m Msg = Msg{Type: Done, Request: RequestInfo{c.id, c.reqno, "", 0, false}}
+	return c.enc.Encode(m)
 }
 
 func (c *Client) NewRequest(val EncoderDecoder) (interface{}, error) {
