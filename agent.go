@@ -84,6 +84,7 @@ type Agent struct {
 	// Application
 	cmdLock *sync.Mutex
 	Cmd     *exec.Cmd // the command that runs the client application
+	Killed  chan bool
 }
 
 // ipv4Reg matches ipv4 addresses.
@@ -155,6 +156,7 @@ func NewAgent(port string, try_recover bool) (*Agent, error) {
 	a.Values = NewValueLog(1000)
 	a.clients = make(map[int]ClientInfo)
 	a.cmdLock = &sync.Mutex{}
+	a.Killed = make(chan bool, 2)
 	return a, nil
 }
 
@@ -241,6 +243,7 @@ func (a *Agent) Close() {
 	log.Println("changed leader status")
 	a.leaderLock.Unlock()
 	log.Println("Shutdown Agent")
+	a.Killed <- true
 }
 
 // newRound initializes a new round for this proposer. It clears the recorded
@@ -284,6 +287,10 @@ func (a *Agent) Run() error {
 	return nil
 }
 
+func (a *Agent) Wait() {
+	<-a.Killed
+}
+
 // StreamLogs streams the "replicated" logs to the given connection, in order.
 func (a *Agent) StreamLogs(enc *json.Encoder) {
 	log.Println("Streaming Logs: ", a.Values)
@@ -315,6 +322,10 @@ func (a *Agent) handleClientRequest(conn net.Conn) {
 		log.Println("Decoded Client Request:", msg)
 		var resp Msg
 		switch msg.Type {
+		case Done:
+			log.Println("Termination Request Received")
+			a.Close()
+			os.Exit(0)
 		case ClientApp:
 			log.Println("Client Application Requesting To Join Paxos Cluster")
 			go a.StreamLogs(enc)
