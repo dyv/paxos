@@ -44,27 +44,50 @@ RequestInfo{
 ```
 #### Message Type
 Message Types are used to specify the type of the Msg. Though they have strings associated with them, they are represented as integers in an enum. They are zero-indexed and are in the order as follows.
-
+##### Note:
+A quorum is defined as the number of paxos agents divided by 2 plus 1: a majority.
+##### Paxos API:
 0. Empty: An empty message is an invalid message and should be ignored.
 Required Fields: None
 1. Prepare: Prepare is the initial Prepare request sent by the Proposer.
-Required Fields: FromAddress, FromPort, Request, Round
-2. Promise: Promise is one of the possible responses an Acceptor can send to the Proposer after receiving a Prepare request. If a proposer has not promised the specified entry, with a round greater than or equal to the round specified in the Prepare request to anyone else and there is no current leader, then the Acceptor should send back a Promise to the Proposer. After sending this Promise, this Acceptor should never send a Promise for this entry with a round less than or equal to the round it promised for.
-Required Fields: FromAddress, FromPort, Request, Round, RoundValue.
+Required Fields:
+	fromaddress - The sender’s (Proposer’s) address
+	fromoport - The sender’s (Proposer’s) address
+	request - The RequestInfo associated with this request
+	round - The round this message is for
+2. Promise: Promise is one of the possible responses an Acceptor can send to the Proposer after receiving a Prepare request. If a proposer has not promised the specified entry, with a round greater than or equal to the round specified in the Prepare request to anyone else and there is no current leader, then the Acceptor should send back a Promise to the Proposer. After sending this Promise, this Acceptor should never send a Promise for this entry with a round less than or equal to the round it promised for. The sender of a Promise, must set his accepted leader to be the Proposer they are promising to.
+Required Fields:
+	fromaddress, fromport, request, round (same as before)
+	roundvalue - The last accepted value for this entry and when it what round it was accepted. If no such value exists, the roundvalue{round: -1, value: “”} is used.
 3. Nack: The response by an Acceptor saying that it has already promised a higher round number to a different Proposer.
-4. AcceptRequest: The message sent out by a Proposer, after receiving a quorum of Promises, for those nodes to accept the associated Msg.value.
-5. Accepted
-6. ClientRequest
-7. ClientResponse
-8. ClientRedirect
-9. ClientConn
-10. ClientConnectRequest
-11. LogRequest
-12. LogResponse
-13. ClientApp
-14. AppResponse
-15. Heartbeat
+Required Fields:
+	fromaddress, fromport, request, round, roundvalue (same as above).
+4. AcceptRequest: Accept request is the response sent by the Proposer after receiving a quorum of promises, or if the Proposer has already been declared leader. It is sent to all Paxos agents, demanding that they accept the specified for this log entry and round. Upon receiving a quorum of Promises, the leader declares himself leader and starts sending out heartbeat messages.
+Required Fields:
+	fromaddress, fromport, request, round (same as before)
+	value - the value the Learners should accept
+5. Accepted: After a Learner has received an AcceptRequest, if they have not already accepted something else, and if the sender is the leader, then they accept the given message, otherwise they send back a Nack response with the previous value that they accepted. If the recipient accepted the value then they commit it to their log. After the Proposer has received a quorum of Accepted responses, they commit the message to their history and send back the ClientResponse to the client who initiated the request.
+Required Fields:
+	fromaddress, fromport, request, round, value (same as before)
+6. Heartbeat: If this agent is the current leader, then it sends out a Heartbeat in regular intervals of 200 milliseconds. If the followers do not receive a Heartbeat from the leader in 400 milliseconds, then they declare the leader dead.
+Required Fields:
+	formatters, forepart, leaderaddress, leaderport
+##### Client API: 
+7. ClientRequest
+8. ClientResponse
+9. ClientRedirect
+10. ClientConn
+11. ClientConnectRequest
+##### Application API:
+12. LogRequest
+13. LogResponse
+14. ClientApp
+15. AppResponse
 16. Done
 17. Error
 #### Paxos API
 Paxos Agents communicate with other Agents through UDP. They communicate with clients and applications through TCP.
+All messages each Paxos agent receives must be stored and flushed into a local log before sending the response. This ensures that the Paxos agents will never go back on their promises even if they crash and recover.
+Whenever a Paxos node starts up, it must read from the local log file that it has accumulated and recover from that. This is to ensure that the Paxos agent always “remembers” values that it has previously accepted as well. This way the accepted values are persisted, and the fact that they were accepted by a majority of nodes is not forgotten.
+#### Client API
+#### App API
